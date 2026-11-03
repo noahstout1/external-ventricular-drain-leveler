@@ -89,8 +89,10 @@ static const float SOFT_LIMIT_DOWN_MM = 150.0f;
 
 // --- Filtering ---
 static const float AVG_WINDOW_S = 3.0f;      // moving-average length
-// Above this 1-sigma spread (in the window) the reading is flagged NOISY.
-static const float MAX_NOISE_CM = 1.5f;
+// The reading is flagged NOISY when the 1-sigma uncertainty of the window
+// AVERAGE exceeds this. (Single samples are much noisier than the average;
+// judging them would flag a healthy system.) Keep it at or below TARGET_CM.
+static const float MAX_NOISE_CM = 0.5f;
 // A real misalignment bigger than this almost certainly means a sensor fell
 // off, the patient sat up, or the pole was bumped — a person should look.
 static const float MAX_PLAUSIBLE_CM = 30.0f;
@@ -115,7 +117,7 @@ static const double G0        = 9.80665;     // m/s^2
 static const float    TRIGGER_CM        = 1.5f;   // start correcting above this
 static const float    TARGET_CM         = 0.5f;   // stop correcting inside this
 static const uint32_t PERSIST_MS        = 5000;   // misalignment must last this long
-static const uint32_t MECH_SETTLE_MS    = 1000;   // ignore samples after a move (sway)
+static const uint32_t MECH_SETTLE_MS    = 2000;   // ignore samples after a move (sway + IIR lag)
 static const uint32_t SETTLE_TIMEOUT_MS = 30000;  // give up waiting for fresh data
 static const float    GAIN              = 0.9f;   // <1 avoids overshoot from noise
 static const float    MIN_MOVE_MM       = 0.5f;
@@ -233,18 +235,34 @@ float configureSensor(BMP581& s, const char* name) {
   const uint8_t odrCodes[] = {BMP5_ODR_10_HZ, BMP5_ODR_05_HZ, BMP5_ODR_04_HZ,
                               BMP5_ODR_03_HZ, BMP5_ODR_02_HZ, BMP5_ODR_01_HZ};
   const float odrVals[] = {10, 5, 4, 3, 2, 1};
-  for (size_t i = 0; i < sizeof(odrCodes); i++) {
+  float hz = 0;
+  for (size_t i = 0; i < sizeof(odrCodes) && hz == 0; i++) {
     if (s.setODRFrequency(odrCodes[i]) != BMP5_OK) continue;
     delay(20);                                // let OSR_EFF update
     bmp5_osr_odr_eff eff = {};
-    if (s.getOSREffective(&eff) == BMP5_OK && eff.odr_is_valid) {
-      Serial.printf("[%s] OSR_P=128x OSR_T=8x ODR=%.0f Hz\n", name, odrVals[i]);
-      return odrVals[i];
-    }
+    if (s.getOSREffective(&eff) == BMP5_OK && eff.odr_is_valid) hz = odrVals[i];
   }
-  Serial.printf("[%s] WARNING: no valid ODR found, using 1 Hz\n", name);
-  s.setODRFrequency(BMP5_ODR_01_HZ);
-  return 1.0f;
+  if (hz == 0) {
+    Serial.printf("[%s] WARNING: no valid ODR found, using 1 Hz\n", name);
+    s.setODRFrequency(BMP5_ODR_01_HZ);
+    hz = 1.0f;
+  }
+  // On-chip IIR low-pass filter: removes most sample-to-sample noise and short
+  // air-pressure gusts (doors, HVAC). Writing it leaves the chip in standby,
+  // so switch back to continuous (normal) mode afterwards.
+  bmp5_iir_config iir = {};
+  iir.set_iir_t = BMP5_IIR_FILTER_COEFF_3;
+  iir.set_iir_p = BMP5_IIR_FILTER_COEFF_3;
+  iir.shdw_set_iir_t = BMP5_ENABLE;
+  iir.shdw_set_iir_p = BMP5_ENABLE;
+  if (s.setFilterConfig(&iir) != BMP5_OK) {
+    Serial.printf("[%s] WARNING: could not enable IIR filter\n", name);
+  }
+  if (s.setMode(BMP5_POWERMODE_NORMAL) != BMP5_OK) {
+    Serial.printf("[%s] WARNING: could not return to normal mode\n", name);
+  }
+  Serial.printf("[%s] OSR_P=128x OSR_T=8x IIR=3 ODR=%.0f Hz\n", name, hz);
+  return hz;
 }
 
 bool initEvdSensor() {
@@ -298,13 +316,14 @@ void pushSample(double dp) {
   if (bufCount < windowLen) bufCount++;
 }
 
-void windowStats(double& mean, double& sd) {
+// mean of the window, and the 1-sigma uncertainty of that mean (Pa)
+void windowStats(double& mean, double& meanSd) {
   double s = 0;
   for (int i = 0; i < bufCount; i++) s += dpBuf[i];
   mean = s / bufCount;
   double v = 0;
   for (int i = 0; i < bufCount; i++) v += (dpBuf[i] - mean) * (dpBuf[i] - mean);
-  sd = bufCount > 1 ? sqrt(v / (bufCount - 1)) : 0;
+  meanSd = bufCount > 1 ? sqrt(v / (bufCount - 1)) / sqrt((double)bufCount) : 0;
 }
 
 // Pa of pressure difference per cm of height, from current air density.

@@ -72,18 +72,34 @@ float configureSensor(BMP581& s, const char* name) {
   const uint8_t odrCodes[] = {BMP5_ODR_10_HZ, BMP5_ODR_05_HZ, BMP5_ODR_04_HZ,
                               BMP5_ODR_03_HZ, BMP5_ODR_02_HZ, BMP5_ODR_01_HZ};
   const float odrVals[] = {10, 5, 4, 3, 2, 1};
-  for (size_t i = 0; i < sizeof(odrCodes); i++) {
+  float hz = 0;
+  for (size_t i = 0; i < sizeof(odrCodes) && hz == 0; i++) {
     if (s.setODRFrequency(odrCodes[i]) != BMP5_OK) continue;
     delay(20);                                // let OSR_EFF update
     bmp5_osr_odr_eff eff = {};
-    if (s.getOSREffective(&eff) == BMP5_OK && eff.odr_is_valid) {
-      Serial.printf("[%s] OSR_P=128x OSR_T=8x ODR=%.0f Hz\n", name, odrVals[i]);
-      return odrVals[i];
-    }
+    if (s.getOSREffective(&eff) == BMP5_OK && eff.odr_is_valid) hz = odrVals[i];
   }
-  Serial.printf("[%s] WARNING: no valid ODR found, using 1 Hz\n", name);
-  s.setODRFrequency(BMP5_ODR_01_HZ);
-  return 1.0f;
+  if (hz == 0) {
+    Serial.printf("[%s] WARNING: no valid ODR found, using 1 Hz\n", name);
+    s.setODRFrequency(BMP5_ODR_01_HZ);
+    hz = 1.0f;
+  }
+  // On-chip IIR low-pass filter: removes most sample-to-sample noise and short
+  // air-pressure gusts (doors, HVAC). Writing it leaves the chip in standby,
+  // so switch back to continuous (normal) mode afterwards.
+  bmp5_iir_config iir = {};
+  iir.set_iir_t = BMP5_IIR_FILTER_COEFF_3;
+  iir.set_iir_p = BMP5_IIR_FILTER_COEFF_3;
+  iir.shdw_set_iir_t = BMP5_ENABLE;
+  iir.shdw_set_iir_p = BMP5_ENABLE;
+  if (s.setFilterConfig(&iir) != BMP5_OK) {
+    Serial.printf("[%s] WARNING: could not enable IIR filter\n", name);
+  }
+  if (s.setMode(BMP5_POWERMODE_NORMAL) != BMP5_OK) {
+    Serial.printf("[%s] WARNING: could not return to normal mode\n", name);
+  }
+  Serial.printf("[%s] OSR_P=128x OSR_T=8x IIR=3 ODR=%.0f Hz\n", name, hz);
+  return hz;
 }
 
 bool initSensor() {

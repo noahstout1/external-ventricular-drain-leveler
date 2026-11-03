@@ -89,7 +89,7 @@ struct __attribute__((packed)) EvdStatusPacket {
   uint8_t  autoOn;
   uint8_t  reserved;
   float    heightErrorCm;  // filtered, see sign convention above
-  float    noiseCm;        // 1-sigma spread inside the averaging window
+  float    noiseCm;        // 1-sigma uncertainty of the averaged error
   float    positionMm;     // + = up, relative to power-on (or 'z' command)
   float    targetMm;
 };
