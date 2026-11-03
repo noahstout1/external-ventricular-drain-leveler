@@ -145,7 +145,8 @@ void sendSample(bool ok) {
 void receiveStatus(uint32_t now) {
   int n;
   while ((n = udp.parsePacket()) > 0) {
-    if (n != (int)sizeof(EvdStatusPacket)) continue;  // ignore junk
+    // Discard junk: an unread packet blocks parsePacket() forever.
+    if (n != (int)sizeof(EvdStatusPacket)) { udp.clear(); continue; }
     EvdStatusPacket p;
     udp.read((uint8_t*)&p, sizeof(p));
     if (p.magic != EVD_MAGIC || p.version != EVD_PROTO_VERSION) continue;

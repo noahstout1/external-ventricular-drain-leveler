@@ -89,8 +89,10 @@ static const float SOFT_LIMIT_DOWN_MM = 150.0f;
 
 // --- Filtering ---
 static const float AVG_WINDOW_S = 3.0f;      // moving-average length
-// Above this 1-sigma spread (in the window) the reading is flagged NOISY.
-static const float MAX_NOISE_CM = 1.5f;
+// The controller acts on the window MEAN, so judge noise by the uncertainty of
+// that mean (sample spread / sqrt(N)), not by the spread of single samples.
+// Two BMP581s alone give ~1.2 cm per-sample spread (~0.3 cm on a 15-sample mean).
+static const float MAX_MEAN_UNC_CM = 0.5f;
 // A real misalignment bigger than this almost certainly means a sensor fell
 // off, the patient sat up, or the pole was bumped — a person should look.
 static const float MAX_PLAUSIBLE_CM = 30.0f;
@@ -115,12 +117,13 @@ static const double G0        = 9.80665;     // m/s^2
 static const float    TRIGGER_CM        = 1.5f;   // start correcting above this
 static const float    TARGET_CM         = 0.5f;   // stop correcting inside this
 static const uint32_t PERSIST_MS        = 5000;   // misalignment must last this long
+static const uint32_t PERSIST_DROPOUT_MS = 3000;  // brief unusable data tolerated while confirming
 static const uint32_t MECH_SETTLE_MS    = 1000;   // ignore samples after a move (sway)
 static const uint32_t SETTLE_TIMEOUT_MS = 30000;  // give up waiting for fresh data
 static const float    GAIN              = 0.9f;   // <1 avoids overshoot from noise
 static const float    MIN_MOVE_MM       = 0.5f;
 static const int      MAX_ITERATIONS    = 4;      // per correction cycle
-static const float    MAX_CYCLE_MOVE_MM = 80.0f;  // total travel per cycle
+static const uint32_t AUTO_TARE_AFTER_MS = 60000; // one forced tare this long after boot
 static const uint32_t LINK_TIMEOUT_MS   = 1500;   // tragus packets must arrive this often
 static const bool     AUTO_ON_BOOT      = false;  // safer: a person turns it on
 
@@ -168,11 +171,13 @@ float slopeTragus = 0, slopeEvd = 0;   // degC per minute
 
 // ---- Calibration (tare) ----
 bool   calibrated = false;
+bool   autoTareDone = false;
+uint32_t lastAutoTareTryMs = 0;
 double tareOffsetPa = 0;
 float  tareTempTragus = 0, tareTempEvd = 0;
 
 // ---- Measurement outputs ----
-float    heightErrCm = 0, noiseCm = 0;
+float    heightErrCm = 0, noiseCm = 0, meanUncCm = 0;  // noiseCm = per-sample 1-sigma
 uint16_t measFlags = 0;
 
 // ---- Control ----
@@ -180,6 +185,7 @@ EvdActuatorState state = AS_AUTO_OFF;
 uint16_t latchedFaults = 0;      // need 'c' to clear
 bool     autoEnabled = AUTO_ON_BOOT;
 uint32_t persistStartMs = 0;
+uint32_t persistLastUsableMs = 0;
 int8_t   persistSign = 0;
 uint32_t settleStartMs = 0;
 int      iteration = 0;
@@ -358,9 +364,10 @@ void computeOutput(uint32_t now) {
   // sensor is ABOVE the tragus  ->  heightErrorCm > 0 (matches protocol).
   heightErrCm = (float)(dp / k);
   noiseCm     = (float)(sdDp / k);
+  meanUncCm   = noiseCm / sqrtf((float)bufCount);
 
   bool valid = calibrated;
-  if (noiseCm > MAX_NOISE_CM) { measFlags |= MF_NOISY; valid = false; }
+  if (meanUncCm > MAX_MEAN_UNC_CM) { measFlags |= MF_NOISY; valid = false; }
   if (fabsf(heightErrCm) > MAX_PLAUSIBLE_CM) { measFlags |= MF_IMPLAUSIBLE; valid = false; }
   if (calibrated &&
       (fabsf(tragus.temperatureC - tareTempTragus) > MAX_TEMP_DRIFT_FROM_TARE_C ||
@@ -411,7 +418,7 @@ bool doTare(bool force) {
   }
   double meanDp, sdDp;
   windowStats(meanDp, sdDp);
-  if (!force && sdDp / paPerCm() > MAX_NOISE_CM) {
+  if (!force && sdDp / paPerCm() / sqrt((double)bufCount) > MAX_MEAN_UNC_CM) {
     Serial.println("TARE REFUSED: readings too noisy (draft? bumped?). Retry or 'T'.");
     return false;
   }
@@ -423,6 +430,16 @@ bool doTare(bool force) {
   Serial.printf("TARE OK: offset %.2f Pa (sensor-to-sensor), Ttragus %.2f C, Tevd %.2f C\n",
                 tareOffsetPa, tareTempTragus, tareTempEvd);
   return true;
+}
+
+// Forced tare once, AUTO_TARE_AFTER_MS after boot (skipped if already tared by hand).
+void autoTare(uint32_t now) {
+  if (autoTareDone || now < AUTO_TARE_AFTER_MS) return;
+  if (calibrated) { autoTareDone = true; return; }
+  if (lastAutoTareTryMs != 0 && now - lastAutoTareTryMs < 1000) return;
+  lastAutoTareTryMs = now;
+  Serial.println("Auto-tare (60 s after boot)...");
+  if (doTare(true)) autoTareDone = true;    // refused (moving/no link/filling) -> retry in 1 s
 }
 
 // ------------------------------- Control -------------------------------------
@@ -470,10 +487,6 @@ bool requestMoveTo(float tgtMm, bool automatic) {
 void startCorrection(float errCm) {
   float moveMm = -GAIN * errCm * 10.0f;          // error>0 (EVD high) -> down
   if (fabsf(moveMm) < MIN_MOVE_MM) { state = AS_IDLE; return; }
-  if (cycleMovedMm + fabsf(moveMm) > MAX_CYCLE_MOVE_MM) {
-    enterFault(AF_CYCLE_LIMIT, "correction cycle exceeded max travel");
-    return;
-  }
   iteration++;
   Serial.printf("CORRECT #%d: error %+.2f cm -> move %+.1f mm\n", iteration, errCm, moveMm);
   if (requestMoveTo(posMm() + moveMm, true)) {
@@ -532,16 +545,33 @@ void controlStep(uint32_t now) {
       if (usable && fabsf(err) > TRIGGER_CM) {
         state = AS_WAIT_PERSIST;
         persistStartMs = now;
+        persistLastUsableMs = now;
         persistSign = err > 0 ? 1 : -1;
         Serial.printf("Misalignment %+.2f cm detected, confirming...\n", err);
       }
       break;
 
     case AS_WAIT_PERSIST: {
+      if (!usable) {
+        // A single noisy/late sample must not restart confirmation; only give
+        // up if trustworthy data stays away for a while.
+        if (now - persistLastUsableMs > PERSIST_DROPOUT_MS) {
+          state = AS_IDLE;
+          Serial.printf("Confirm aborted: no usable data for %lu ms: noise %.2f cm (mean +-%.2f) "
+                        "link %s (age %lu ms) window %d/%d flags:",
+                        (unsigned long)(now - persistLastUsableMs), noiseCm, meanUncCm,
+                        linkOk(now) ? "ok" : "LOST", (unsigned long)(now - lastTragusMs),
+                        bufCount, windowLen);
+          printMeasFlags(measFlags);
+          Serial.println();
+        }
+        break;
+      }
+      persistLastUsableMs = now;
       int8_t sign = err > 0 ? 1 : -1;
-      if (!usable || fabsf(err) <= TRIGGER_CM || sign != persistSign) {
-        state = AS_IDLE;                        // transient, ignore it
-        Serial.println("Misalignment cleared on its own (transient).");
+      if (fabsf(err) <= TRIGGER_CM || sign != persistSign) {
+        state = AS_IDLE;                        // error genuinely went away
+        Serial.printf("Misalignment cleared on its own (now %+.2f cm).\n", err);
       } else if (now - persistStartMs >= PERSIST_MS) {
         iteration = 0;
         cycleMovedMm = 0;
@@ -586,7 +616,8 @@ void controlStep(uint32_t now) {
 void receivePackets(uint32_t now) {
   int n;
   while ((n = udp.parsePacket()) > 0) {
-    if (n != (int)sizeof(EvdTragusPacket)) continue;
+    // Discard wrong-size packets: an unread packet blocks parsePacket() forever.
+    if (n != (int)sizeof(EvdTragusPacket)) { udp.clear(); continue; }
     EvdTragusPacket p;
     udp.read((uint8_t*)&p, sizeof(p));
     if (p.magic != EVD_MAGIC || p.version != EVD_PROTO_VERSION) continue;
@@ -644,9 +675,9 @@ void printMeasFlags(uint16_t f) {
 }
 
 void printStatusLine(uint32_t now) {
-  Serial.printf("%-8s auto:%s pos %+7.2f mm | err %+6.2f cm (+-%.2f) |",
+  Serial.printf("%-8s auto:%s pos %+7.2f mm | err %+6.2f cm (mean +-%.2f, sample +-%.2f) |",
                 evdStateName(state), autoEnabled ? "ON " : "OFF", posMm(),
-                heightErrCm, noiseCm);
+                heightErrCm, meanUncCm, noiseCm);
   printMeasFlags(measFlags);
   if (latchedFaults) Serial.printf(" | FAULTS 0x%04X", latchedFaults);
   Serial.printf(" | clients %d\n", WiFi.softAPgetStationNum());
@@ -791,7 +822,8 @@ void setup() {
   state = autoEnabled ? AS_IDLE : AS_AUTO_OFF;
   if (ESTOP_PIN >= 0 && estop()) enterFault(AF_ESTOP, "E-STOP active at boot");
   printHelp();
-  Serial.println("Level the EVD to the tragus by hand, wait for T_STABLE, then tare ('t').");
+  Serial.println("Level the EVD to the tragus by hand; the node will auto-tare 60 s after boot "
+                 "(or send 't' sooner).");
 }
 
 void loop() {
@@ -818,6 +850,7 @@ void loop() {
   trackMotion(now);
   safetyChecks(now);
   controlStep(now);
+  autoTare(now);
   stepper.run();
 
   handleSerial();
