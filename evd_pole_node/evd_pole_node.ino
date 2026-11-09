@@ -39,7 +39,9 @@
 //   r        toggle raw CSV logging
 //   p        print detailed status
 //   h        help
-// BOOT button (GPIO0): short press = toggle auto, hold 3 s = tare.
+// Push button (GPIO4 to GND; the onboard BOOT button does the same):
+//   1 click  = tare        2 clicks = toggle auto on/off
+// LED confirms: 1 flash = tared, 2 = auto ON, 3 = auto OFF, rapid flicker = refused.
 // =============================================================================
 #include <Arduino.h>
 #include <Wire.h>
@@ -70,8 +72,14 @@ static const int  LIMIT_BOTTOM_PIN = -1;
 static const bool LIMITS_NORMALLY_CLOSED = true;  // NC = broken wire reads as tripped
 static const int  ESTOP_PIN        = -1;
 static const bool ESTOP_NORMALLY_CLOSED  = true;
-static const int  BUTTON_PIN       = 0;           // BOOT button; -1 to disable
-static const uint32_t TARE_HOLD_MS = 3000;
+// Push button: momentary, between the pin and GND (internal pull-up, no resistor).
+// GPIO4 is free, has a pull-up, and has no boot-strapping role.
+static const int  BUTTON_PIN       = 4;           // external button; -1 to disable
+static const int  BOOT_BUTTON_PIN  = 0;           // onboard BOOT, same actions; -1 off
+static const uint32_t BUTTON_DEBOUNCE_MS  = 30;
+static const uint32_t BUTTON_CLICK_GAP_MS = 400;  // max pause between double-click presses
+static const uint32_t BUTTON_MAX_PRESS_MS = 1500; // longer holds are ignored
+static const bool BUTTON_TARE_FORCE = true;       // 1-click tare skips the T_STABLE wait
 static const int  LED_PIN          = 2;           // onboard LED on most DevKits; -1 off
 
 // --- Mechanics ---
@@ -197,8 +205,13 @@ bool     rawLogging = false;
 uint32_t lastStatusTxMs = 0, lastPrintMs = 0, lastInitTryMs = 0, lastComputeMs = 0;
 uint32_t txSeq = 0;
 String   serialLine;
-bool     buttonWasDown = false, buttonLongDone = false;
-uint32_t buttonDownMs = 0;
+bool     btnRaw = false, btnDown = false;   // raw reading / debounced state
+uint32_t btnRawChangeMs = 0, btnPressMs = 0, btnReleaseMs = 0;
+uint8_t  btnClicks = 0;
+bool     btnLongPress = false;
+uint8_t  ledAckFlashes = 0;               // LED confirmation after a button action
+uint32_t ledAckStartMs = 0;
+bool     ledAckActive = false;
 
 // ------------------------------- Helpers -------------------------------------
 float posMm()    { return stepper.currentPosition() / STEPS_PER_MM; }
@@ -674,6 +687,7 @@ void printHelp() {
   Serial.println("Commands: t=tare  T=force tare  a=auto on/off  u <mm>=jog up  "
                  "d <mm>=jog down  s=stop  c=clear faults  z=zero position  "
                  "r=raw CSV  p=status  h=help");
+  Serial.println("Button: click = tare, double-click = auto on/off");
 }
 
 void printMeasFlags(uint16_t f) {
@@ -771,25 +785,68 @@ void handleSerial() {
   }
 }
 
+// flashes = 1..3 for a confirmation, 0 for "refused" (rapid flicker)
+void ledAck(uint8_t flashes, uint32_t now) {
+  ledAckFlashes = flashes;
+  ledAckStartMs = now;
+  ledAckActive = true;
+}
+
+bool buttonPressedRaw() {
+  return (BUTTON_PIN >= 0 && digitalRead(BUTTON_PIN) == LOW) ||
+         (BOOT_BUTTON_PIN >= 0 && digitalRead(BOOT_BUTTON_PIN) == LOW);
+}
+
+// Counts clicks; acts once the button has been released for BUTTON_CLICK_GAP_MS.
 void handleButton(uint32_t now) {
-  if (BUTTON_PIN < 0) return;
-  bool down = digitalRead(BUTTON_PIN) == LOW;
-  if (down && !buttonWasDown) { buttonDownMs = now; buttonLongDone = false; }
-  if (down && !buttonLongDone && now - buttonDownMs >= TARE_HOLD_MS) {
-    buttonLongDone = true;
-    Serial.println("Button tare requested.");
-    doTare(false);
+  bool raw = buttonPressedRaw();
+  if (raw != btnRaw) { btnRaw = raw; btnRawChangeMs = now; }
+  if (raw != btnDown && now - btnRawChangeMs >= BUTTON_DEBOUNCE_MS) {
+    btnDown = raw;
+    if (btnDown) {
+      btnPressMs = now;
+    } else {
+      if (now - btnPressMs > BUTTON_MAX_PRESS_MS) btnLongPress = true;
+      btnClicks++;
+      btnReleaseMs = now;
+    }
   }
-  if (!down && buttonWasDown && !buttonLongDone &&
-      now - buttonDownMs > 50 && now - buttonDownMs < 1500) {
+  if (btnClicks == 0 || btnDown || now - btnReleaseMs < BUTTON_CLICK_GAP_MS) return;
+
+  uint8_t clicks = btnClicks;
+  bool longPress = btnLongPress;
+  btnClicks = 0;
+  btnLongPress = false;
+  if (longPress) {
+    Serial.println("Button: held too long, ignored (click = tare, double-click = auto).");
+  } else if (clicks == 1) {
+    Serial.println("Button: 1 click -> tare");
+    ledAck(doTare(BUTTON_TARE_FORCE) ? 1 : 0, now);
+  } else if (clicks == 2) {
+    Serial.println("Button: 2 clicks -> toggle auto");
     setAuto(!autoEnabled);
+    ledAck(autoEnabled ? 2 : 3, now);
+  } else {
+    Serial.printf("Button: %u clicks ignored (click = tare, double-click = auto).\n", clicks);
+    ledAck(0, now);
   }
-  buttonWasDown = down;
 }
 
 void updateLed(uint32_t now) {
   if (LED_PIN < 0) return;
   bool on;
+  if (ledAckActive) {
+    uint32_t t = now - ledAckStartMs;
+    if (ledAckFlashes == 0) {                 // refused: rapid flicker for 1 s
+      on = (t / 50) % 2;
+      if (t >= 1000) ledAckActive = false;
+    } else {                                  // 300 ms dark, then N 250 ms flashes
+      on = t >= 300 && ((t - 300) / 250) % 2 == 0;
+      if (t >= 300 + ledAckFlashes * 500u) ledAckActive = false;
+    }
+    digitalWrite(LED_PIN, on);
+    return;
+  }
   if (state == AS_FAULT)                                   on = (now / 100) % 2;  // fast blink
   else if (state == AS_MOVING || state == AS_SETTLING ||
            state == AS_WAIT_PERSIST)                       on = (now / 500) % 2;  // slow blink
@@ -812,6 +869,7 @@ void setup() {
   if (LIMIT_BOTTOM_PIN >= 0) pinMode(LIMIT_BOTTOM_PIN, INPUT_PULLUP);
   if (ESTOP_PIN >= 0)        pinMode(ESTOP_PIN, INPUT_PULLUP);
   if (BUTTON_PIN >= 0)       pinMode(BUTTON_PIN, INPUT_PULLUP);
+  if (BOOT_BUTTON_PIN >= 0)  pinMode(BOOT_BUTTON_PIN, INPUT_PULLUP);
   if (LED_PIN >= 0)          pinMode(LED_PIN, OUTPUT);
 
   stepper.setPinsInverted(DIR_INVERT, false, false);
