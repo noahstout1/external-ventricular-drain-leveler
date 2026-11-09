@@ -36,16 +36,29 @@ Optional limit switches and an e-stop: set `LIMIT_TOP_PIN`, `LIMIT_BOTTOM_PIN` a
 1. Change `EVD_WIFI_SSID` / `EVD_WIFI_PASS` in `evd_protocol.h`, then copy the file into both folders.
 2. Flash both boards and open the pole node's Serial Monitor at 115200 baud with line ending set to Newline.
 3. With auto off, send `u 5`. If the pole goes **down**, set `DIR_INVERT = true`.
-4. Level the EVD to the tragus by hand. Wait until the status line shows `T_STABLE` (about 60 s of steady temperatures), then click the button once (or send `t`). The pole node also tares itself once, 60 s after power-up, if nobody has.
+4. Level the EVD to the tragus by hand. Wait until the status line shows `T_STABLE` (about 60 s of steady temperatures), then click the button once (or send `t`). If temperatures aren't stable yet, the tare waits and happens by itself once they are. At power-up the pole node starts one of these waiting tares automatically (forced after 10 min if temperatures never settle).
 5. Double-click the button (or send `a`) to turn automatic correction on. Double-click again to turn it off.
 
 ## Button
 | Action | Result | LED confirms |
 |---|---|---|
-| 1 click | Tare (zero) both pressure sensors | 1 flash (rapid flicker = refused, e.g. pole moving or no tragus link) |
+| 1 click | Tare (zero) both pressure sensors. If temperatures aren't stable, it waits and tares by itself once they are. | 1 flash = tared. Short blip every second = waiting. Rapid flicker = refused (e.g. pole moving or no tragus link). |
+| 1 click while waiting | Tare right now, skipping the temperature wait | 1 flash |
 | 2 clicks | Toggle automatic correction | 2 flashes = auto ON, 3 flashes = auto OFF |
 
-Clicks must be under 0.4 s apart; holds longer than 1.5 s are ignored. A 1-click tare skips the temperature-stability wait (`BUTTON_TARE_FORCE`).
+Clicks must be under 0.4 s apart; holds longer than 1.5 s are ignored. No automatic corrections start while a tare is waiting.
+
+## Correction limits
+- After each correction cycle, the next one can't start for 60 s (`CORRECTION_COOLDOWN_MS`). Turning auto on resets this.
+- One cycle may move the pole at most 50 mm (`MAX_CYCLE_MOVE_MM`); more raises a `CYCLE_LIMIT` fault.
+- `TEMP_DRIFT` appears once either sensor is 0.5 °C away from its temperature at tare (`MAX_TEMP_DRIFT_FROM_TARE_C`). Auto stops correcting until you level by hand and tare again.
+
+## Getting a good tare
+- **Draft shields:** cover each BMP581 with a small cap that blocks air movement but not static pressure, e.g. a 3D-printed or film-canister cap with a ~1 mm vent hole or a plug of open-cell foam over the opening. Don't seal it airtight and don't press anything on the chip.
+- **Tragus sensor:** put a thin foam pad (2–3 mm) between the sensor and the skin, and let it sit on the patient for 5–10 min before tare.
+- **Keep heat away:** mount each sensor 10+ cm from the ESP32, TB6600 and motor, out of direct sunlight and vents.
+- **Power up early:** turn both nodes on several minutes before leveling so the boards reach a steady temperature.
+- Tare only once `T_STABLE` shows (the button's waiting tare does this for you).
 
 ## Pole node commands
 `t` tare · `T` force tare · `a` auto on/off · `u <mm>` / `d <mm>` jog · `s` stop · `c` clear faults · `z` zero position · `r` raw CSV · `p` details · `h` help

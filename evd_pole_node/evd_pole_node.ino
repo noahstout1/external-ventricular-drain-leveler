@@ -18,9 +18,12 @@
 //   2. Move the pole by -GAIN * error.
 //   3. Throw away the averaging window, wait MECH_SETTLE_MS for the pole to
 //      stop swaying, then refill the window with fresh samples.
-//   4. If still outside TARGET_CM, repeat (max MAX_ITERATIONS), else done.
+//   4. If still outside TARGET_CM, repeat (max MAX_ITERATIONS, max
+//      MAX_CYCLE_MOVE_MM of travel), else done.
+//   5. Wait CORRECTION_COOLDOWN_MS before another cycle may start.
 //   Motion stops immediately on: lost tragus link, sensor fault, limit switch,
 //   e-stop, or a correction that would exceed travel limits.
+//   No new cycle starts while a tare is waiting for stable temperatures.
 //
 // Libraries (Arduino Library Manager):
 //   * "SparkFun BMP581 Arduino Library"
@@ -40,8 +43,12 @@
 //   p        print detailed status
 //   h        help
 // Push button (GPIO4 to GND; the onboard BOOT button does the same):
-//   1 click  = tare        2 clicks = toggle auto on/off
+//   1 click  = tare. If temperatures are not stable yet, the tare WAITS and
+//              happens by itself once they are (LED: short blip every second).
+//              Click again while waiting = tare right now anyway.
+//   2 clicks = toggle auto on/off
 // LED confirms: 1 flash = tared, 2 = auto ON, 3 = auto OFF, rapid flicker = refused.
+// At power-up a waiting tare is started automatically (forced after 10 min).
 // =============================================================================
 #include <Arduino.h>
 #include <Wire.h>
@@ -79,7 +86,6 @@ static const int  BOOT_BUTTON_PIN  = 0;           // onboard BOOT, same actions;
 static const uint32_t BUTTON_DEBOUNCE_MS  = 30;
 static const uint32_t BUTTON_CLICK_GAP_MS = 400;  // max pause between double-click presses
 static const uint32_t BUTTON_MAX_PRESS_MS = 1500; // longer holds are ignored
-static const bool BUTTON_TARE_FORCE = true;       // 1-click tare skips the T_STABLE wait
 static const int  LED_PIN          = 2;           // onboard LED on most DevKits; -1 off
 
 // --- Mechanics ---
@@ -113,7 +119,9 @@ static const float TCO_TRAGUS_PA_PER_K = 0.0f;
 static const float TCO_EVD_PA_PER_K    = 0.0f;
 // If either sensor drifts this far from its temperature at tare, the reading
 // is marked invalid (re-tare needed). Tighten/loosen after bench testing.
-static const float MAX_TEMP_DRIFT_FROM_TARE_C = 2.0f;
+// With TCO = 0, 0.5 C of drift is ~2 cm of false error. Loosen only after the
+// TCO_* values above have been measured.
+static const float MAX_TEMP_DRIFT_FROM_TARE_C = 0.5f;
 // Temperature counts as "stable" when it changes less than this per minute.
 static const float TEMP_STABLE_C_PER_MIN = 0.10f;
 
@@ -131,7 +139,9 @@ static const uint32_t SETTLE_TIMEOUT_MS = 30000;  // give up waiting for fresh d
 static const float    GAIN              = 0.9f;   // <1 avoids overshoot from noise
 static const float    MIN_MOVE_MM       = 0.5f;
 static const int      MAX_ITERATIONS    = 4;      // per correction cycle
-static const uint32_t AUTO_TARE_AFTER_MS = 60000; // one forced tare this long after boot
+static const float    MAX_CYCLE_MOVE_MM = 50.0f;  // fault if one cycle needs more travel
+static const uint32_t CORRECTION_COOLDOWN_MS = 60000; // min gap between correction cycles
+static const uint32_t TARE_WAIT_MAX_MS  = 600000; // waiting tare is forced after 10 min
 static const uint32_t LINK_TIMEOUT_MS   = 1500;   // tragus packets must arrive this often
 static const bool     AUTO_ON_BOOT      = false;  // safer: a person turns it on
 
@@ -179,8 +189,9 @@ float slopeTragus = 0, slopeEvd = 0;   // degC per minute
 
 // ---- Calibration (tare) ----
 bool   calibrated = false;
-bool   autoTareDone = false;
-uint32_t lastAutoTareTryMs = 0;
+bool     tarePending = false;        // waiting for stable temperatures to tare
+bool     tarePendingByUser = false;  // false = the power-up tare
+uint32_t tarePendingSinceMs = 0, lastTareTryMs = 0;
 double tareOffsetPa = 0;
 float  tareTempTragus = 0, tareTempEvd = 0;
 
@@ -199,6 +210,8 @@ uint32_t settleStartMs = 0;
 int      iteration = 0;
 float    cycleMovedMm = 0;
 bool     wasMoving = false;
+bool     cooldownActive = false;    // a correction cycle ended recently
+uint32_t lastCycleEndMs = 0;
 
 // ---- UI ----
 bool     rawLogging = false;
@@ -432,25 +445,31 @@ void onTragusSample(uint32_t now, uint32_t prevTragusMs) {
 }
 
 // ------------------------------ Calibration ----------------------------------
+// Why a tare cannot happen right now, or nullptr if it can. force skips the
+// temperature-stability and noise checks (never the moving/link checks).
+const char* tareBlocker(bool force) {
+  if (isMoving()) return "pole is moving";
+  if (!evdHealthy() || !linkOk(millis()) || bufCount < windowLen)
+    return "sensors/link not ready or window not full yet";
+  if (force) return nullptr;
+  if (!tempsStable()) return "temperatures still changing";
+  double meanDp, sdDp;
+  windowStats(meanDp, sdDp);
+  if (sdDp / paPerCm() > MAX_NOISE_CM) return "readings too noisy (draft? bumped?)";
+  return nullptr;
+}
+
 bool doTare(bool force) {
-  if (isMoving()) { Serial.println("TARE REFUSED: pole is moving."); return false; }
-  if (!evdHealthy() || !linkOk(millis()) || bufCount < windowLen) {
-    Serial.println("TARE REFUSED: sensors/link not ready or window not full yet.");
-    return false;
-  }
-  if (!force && !tempsStable()) {
-    Serial.printf("TARE REFUSED: temperatures still changing "
-                  "(tragus %.2f, evd %.2f C/min; need < %.2f, and 60 s of history). "
-                  "Wait, or send 'T' to force.\n",
-                  slopeTragus, slopeEvd, TEMP_STABLE_C_PER_MIN);
+  const char* why = tareBlocker(force);
+  if (why) {
+    Serial.printf("TARE REFUSED: %s (temp slopes tragus %.2f, evd %.2f C/min; "
+                  "need < %.2f and 60 s of history).\n",
+                  why, slopeTragus, slopeEvd, TEMP_STABLE_C_PER_MIN);
     return false;
   }
   double meanDp, sdDp;
   windowStats(meanDp, sdDp);
-  if (!force && sdDp / paPerCm() > MAX_NOISE_CM) {
-    Serial.println("TARE REFUSED: readings too noisy (draft? bumped?). Retry or 'T'.");
-    return false;
-  }
+  tarePending    = false;
   tareOffsetPa   = meanDp;
   tareTempTragus = tragus.temperatureC;
   tareTempEvd    = tEvd;
@@ -461,14 +480,39 @@ bool doTare(bool force) {
   return true;
 }
 
-// Forced tare once, AUTO_TARE_AFTER_MS after boot (skipped if already tared by hand).
-void autoTare(uint32_t now) {
-  if (autoTareDone || now < AUTO_TARE_AFTER_MS) return;
-  if (calibrated) { autoTareDone = true; return; }
-  if (lastAutoTareTryMs != 0 && now - lastAutoTareTryMs < 1000) return;
-  lastAutoTareTryMs = now;
-  Serial.println("Auto-tare (60 s after boot)...");
-  if (doTare(true)) autoTareDone = true;    // refused (moving/no link/filling) -> retry in 1 s
+void startPendingTare(uint32_t now, bool byUser) {
+  tarePending = true;
+  tarePendingByUser = byUser;
+  tarePendingSinceMs = now;
+  lastTareTryMs = now;
+  Serial.println("TARE WAITING: will tare automatically once temperatures are stable "
+                 "(click again / send 'T' to tare now).");
+}
+
+// A person asked to tare (button click or 't'). Returns 1 = tared, 0 = refused,
+// -1 = now waiting for stable temperatures.
+int requestTare(uint32_t now, bool forceIfWaiting) {
+  if (tarePending && tarePendingByUser && forceIfWaiting) {
+    Serial.println("Tare requested again while waiting: forcing now.");
+    return doTare(true) ? 1 : 0;
+  }
+  if (tarePending && tarePendingByUser) {
+    Serial.println("Tare is already waiting for stable temperatures ('T' forces it).");
+    return -1;
+  }
+  if (tareBlocker(false) == nullptr) return doTare(false) ? 1 : 0;
+  startPendingTare(now, true);
+  return -1;
+}
+
+// Performs a waiting tare as soon as it is allowed; forced after TARE_WAIT_MAX_MS.
+void serviceTare(uint32_t now) {
+  if (!tarePending || now - lastTareTryMs < 1000) return;
+  lastTareTryMs = now;
+  bool timeUp = now - tarePendingSinceMs >= TARE_WAIT_MAX_MS;
+  if (tareBlocker(timeUp) != nullptr) return;          // keep waiting quietly
+  if (timeUp) Serial.println("Tare: temperatures never settled within 10 min; forcing.");
+  if (doTare(timeUp)) ledAck(1, now);
 }
 
 // ------------------------------- Control -------------------------------------
@@ -516,6 +560,12 @@ bool requestMoveTo(float tgtMm, bool automatic) {
 void startCorrection(float errCm) {
   float moveMm = -GAIN * errCm * 10.0f;          // error>0 (EVD high) -> down
   if (fabsf(moveMm) < MIN_MOVE_MM) { state = AS_IDLE; return; }
+  // If the EVD sensor stops tracking the pole (fell off, wrong mount), errors
+  // never shrink; cap travel per cycle so that can't drive the pole far.
+  if (cycleMovedMm + fabsf(moveMm) > MAX_CYCLE_MOVE_MM) {
+    enterFault(AF_CYCLE_LIMIT, "correction cycle exceeded max travel");
+    return;
+  }
   iteration++;
   Serial.printf("CORRECT #%d: error %+.2f cm -> move %+.1f mm\n", iteration, errCm, moveMm);
   if (requestMoveTo(posMm() + moveMm, true)) {
@@ -526,6 +576,7 @@ void startCorrection(float errCm) {
 
 void setAuto(bool on) {
   autoEnabled = on;
+  cooldownActive = false;   // a person just turned it on: allow correcting right away
   halt();
   if (state != AS_FAULT) state = on ? AS_IDLE : AS_AUTO_OFF;
   Serial.printf("Automatic correction %s\n", on ? "ON" : "OFF");
@@ -568,9 +619,14 @@ void controlStep(uint32_t now) {
 
   float err = heightErrCm;
   bool usable = linkOk(now) && measActionable();
+  if (tarePending && state == AS_WAIT_PERSIST) state = AS_IDLE;  // don't start mid-leveling
 
   switch (state) {
     case AS_IDLE:
+      if (cooldownActive && now - lastCycleEndMs >= CORRECTION_COOLDOWN_MS) cooldownActive = false;
+      // No new cycle while a tare is waiting (someone is leveling by hand) or
+      // right after a cycle (stops chasing slow drift every few seconds).
+      if (tarePending || cooldownActive) break;
       if (usable && fabsf(err) > TRIGGER_CM) {
         state = AS_WAIT_PERSIST;
         persistStartMs = now;
@@ -623,6 +679,7 @@ void controlStep(uint32_t now) {
         if (now - settleStartMs > SETTLE_TIMEOUT_MS) {   // data never came back
           Serial.println("No usable data after move; returning to IDLE.");
           state = AS_IDLE;
+          cooldownActive = true; lastCycleEndMs = now;
         }
         break;
       }
@@ -630,6 +687,7 @@ void controlStep(uint32_t now) {
         Serial.printf("ALIGNED: error %+.2f cm after %d move(s), pos %+.1f mm\n",
                       err, iteration, posMm());
         state = AS_IDLE;
+        cooldownActive = true; lastCycleEndMs = now;
       } else if (iteration >= MAX_ITERATIONS) {
         enterFault(AF_NO_CONVERGE, "not converging (sensor drift? slipping nut?)");
       } else {
@@ -709,6 +767,11 @@ void printStatusLine(uint32_t now) {
                 evdStateName(state), autoEnabled ? "ON " : "OFF", posMm(),
                 heightErrCm, noiseCm);
   printMeasFlags(measFlags);
+  if (tarePending) Serial.print(" | TARE WAITING");
+  if (cooldownActive && state == AS_IDLE)
+    Serial.printf(" | cooldown %lus",
+                  (unsigned long)((CORRECTION_COOLDOWN_MS - min(now - lastCycleEndMs,
+                                                                CORRECTION_COOLDOWN_MS)) / 1000));
   if (latchedFaults) Serial.printf(" | FAULTS 0x%04X", latchedFaults);
   Serial.printf(" | clients %d\n", WiFi.softAPgetStationNum());
 }
@@ -742,7 +805,7 @@ void handleCommand(String cmd) {
   char c = cmd.charAt(0);
   float arg = cmd.length() > 1 ? cmd.substring(1).toFloat() : 0;
   switch (c) {
-    case 't': doTare(false); break;
+    case 't': requestTare(millis(), false); break;
     case 'T': doTare(true); break;
     case 'a': setAuto(!autoEnabled); break;
     case 'u': case 'd': {
@@ -821,7 +884,8 @@ void handleButton(uint32_t now) {
     Serial.println("Button: held too long, ignored (click = tare, double-click = auto).");
   } else if (clicks == 1) {
     Serial.println("Button: 1 click -> tare");
-    ledAck(doTare(BUTTON_TARE_FORCE) ? 1 : 0, now);
+    int r = requestTare(now, true);
+    if (r >= 0) ledAck(r == 1 ? 1 : 0, now);   // waiting: LED shows the waiting blip
   } else if (clicks == 2) {
     Serial.println("Button: 2 clicks -> toggle auto");
     setAuto(!autoEnabled);
@@ -848,6 +912,7 @@ void updateLed(uint32_t now) {
     return;
   }
   if (state == AS_FAULT)                                   on = (now / 100) % 2;  // fast blink
+  else if (tarePending)                                    on = now % 1000 < 100; // waiting-tare blip
   else if (state == AS_MOVING || state == AS_SETTLING ||
            state == AS_WAIT_PERSIST)                       on = (now / 500) % 2;  // slow blink
   else if (state == AS_IDLE && measActionable())           on = true;             // solid
@@ -896,8 +961,9 @@ void setup() {
   state = autoEnabled ? AS_IDLE : AS_AUTO_OFF;
   if (ESTOP_PIN >= 0 && estop()) enterFault(AF_ESTOP, "E-STOP active at boot");
   printHelp();
-  Serial.println("Level the EVD to the tragus by hand; the node will auto-tare 60 s after boot "
-                 "(or send 't' sooner).");
+  Serial.println("Level the EVD to the tragus by hand. The node tares itself once both "
+                 "sensor temperatures are stable (forced after 10 min).");
+  startPendingTare(millis(), false);
 }
 
 void loop() {
@@ -924,7 +990,7 @@ void loop() {
   trackMotion(now);
   safetyChecks(now);
   controlStep(now);
-  autoTare(now);
+  serviceTare(now);
   stepper.run();
 
   handleSerial();
