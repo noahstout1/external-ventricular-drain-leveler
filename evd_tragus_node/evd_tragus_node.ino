@@ -34,7 +34,8 @@ static const uint32_t I2C_CLOCK_HZ = 100000; // keep low if the sensor cable is 
 static const int LED_PIN = 2;                // onboard LED on most DevKits; -1 off
 
 // --- Timing ---
-static const uint32_t STATUS_PRINT_MS   = 1000;
+static const uint32_t STATUS_PRINT_MS   = 2000;
+static const float    LEVEL_BAND_CM     = 0.5f;  // shown as "level"; match TARGET_CM on pole
 static const uint32_t WIFI_RETRY_MS     = 10000; // a WiFi join can take several s
 static const uint32_t POLE_TIMEOUT_MS   = 2000;
 static const int      MAX_READ_ERRORS   = 5;     // consecutive, before re-init
@@ -57,6 +58,7 @@ bool     havePoleStatus = false;
 uint32_t lastPoleStatusMs = 0;
 
 bool rawLogging = false;
+bool poleWasOk = false;          // to announce link changes once
 uint32_t lastSampleMs = 0, lastPrintMs = 0, lastWifiAttemptMs = 0, lastInitTryMs = 0;
 
 // ------------------------------- Sensor --------------------------------------
@@ -98,7 +100,6 @@ float configureSensor(BMP581& s, const char* name) {
   if (s.setMode(BMP5_POWERMODE_NORMAL) != BMP5_OK) {
     Serial.printf("[%s] WARNING: could not return to normal mode\n", name);
   }
-  Serial.printf("[%s] OSR_P=128x OSR_T=8x IIR=3 ODR=%.0f Hz\n", name, hz);
   return hz;
 }
 
@@ -110,12 +111,11 @@ bool initSensor() {
       sensorAddr = a;
       odrHz = configureSensor(sensor, "TRAGUS");
       samplePeriodMs = (uint32_t)(1000.0f / odrHz);
-      Serial.printf("Tragus BMP581 at 0x%02X, sampling every %lu ms\n", a,
-                    (unsigned long)samplePeriodMs);
+      Serial.printf("Tragus sensor OK (%.0f readings/s)\n", odrHz);
       return true;
     }
   }
-  Serial.println("ERROR: tragus BMP581 not found at 0x47 or 0x46 (check wiring).");
+  Serial.println("** Tragus sensor NOT FOUND - check its wiring (retrying every 5 s)");
   return false;
 }
 
@@ -138,7 +138,6 @@ void maintainWifi(uint32_t now) {
   if (WiFi.status() == WL_CONNECTED) return;
   if (lastWifiAttemptMs != 0 && now - lastWifiAttemptMs < WIFI_RETRY_MS) return;
   lastWifiAttemptMs = now;
-  Serial.println("WiFi: connecting to pole node AP...");
   WiFi.disconnect();
   WiFi.begin(EVD_WIFI_SSID, EVD_WIFI_PASS);
 }
@@ -178,38 +177,34 @@ bool poleOk(uint32_t now) {
 
 // ------------------------------- UI / Serial ---------------------------------
 void printHelp() {
-  Serial.println("Commands: r=raw CSV on/off  p=status  h=help  "
-                 "(tare and auto on/off are done on the POLE node)");
+  Serial.println("Tare and auto on/off are done with the button on the POLE node.");
+  Serial.println("Debug:    p details | r raw data | h help");
 }
 
-void printMeasFlags(uint16_t f) {
-  if (f & MF_VALID)        Serial.print(" VALID");
-  if (f & MF_CALIBRATED)   Serial.print(" CAL");
-  if (f & MF_TEMP_STABLE)  Serial.print(" T_STABLE");
-  if (f & MF_SENSOR_FAULT) Serial.print(" EVD_SENSOR_FAULT");
-  if (f & MF_TRAGUS_FAULT) Serial.print(" TRAGUS_SENSOR_FAULT");
-  if (f & MF_TRAGUS_LINK)  Serial.print(" TRAGUS_LINK_LOST");
-  if (f & MF_IMPLAUSIBLE)  Serial.print(" IMPLAUSIBLE");
-  if (f & MF_NOISY)        Serial.print(" NOISY");
-  if (f & MF_TEMP_DRIFT)   Serial.print(" TEMP_DRIFT(re-tare)");
-  if (f & MF_WARMING_UP)   Serial.print(" FILLING");
-  if (!(f & MF_CALIBRATED)) Serial.print(" NEEDS_TARE");
-}
-
+// Example: Tragus sensor OK | Auto ON  | WATCHING   | EVD level (+0.3 cm)  | OK
 void printStatusLine(uint32_t now) {
-  Serial.printf("P %.2f Pa  T %.2f C  sensor %s | WiFi %s |", pressurePa, tempC,
-                sensorOk && consecutiveReadErrors == 0 ? "OK" : "FAULT",
-                WiFi.status() == WL_CONNECTED ? "OK" : "--");
-  if (poleOk(now)) {
-    Serial.printf(" pole %s auto:%s err %+6.2f cm (+-%.2f) pos %+.1f mm",
-                  evdStateName(poleStatus.state), poleStatus.autoOn ? "ON" : "OFF",
-                  poleStatus.heightErrorCm, poleStatus.noiseCm, poleStatus.positionMm);
-    printMeasFlags(poleStatus.measFlags);
-    if (poleStatus.faults) Serial.printf(" faults 0x%04X", poleStatus.faults);
-  } else {
-    Serial.print(" pole (no status)");
+  bool sensorGood = sensorOk && consecutiveReadErrors == 0;
+  Serial.printf("Tragus sensor %-4s | ", sensorGood ? "OK" : "FAIL");
+  if (!poleOk(now)) {
+    Serial.println(WiFi.status() == WL_CONNECTED ? "Connected to WiFi, waiting for pole node"
+                                                 : "Searching for pole node WiFi...");
+    return;
   }
-  Serial.println();
+  char err[32];
+  evdDescribeError(err, sizeof(err), poleStatus.heightErrorCm, poleStatus.measFlags,
+                   LEVEL_BAND_CM);
+  const char* msg = evdIssue(poleStatus.measFlags, poleStatus.faults & ~AF_LINK_LOST);
+  if (!msg) {
+    switch (poleStatus.state) {
+      case AS_FAULT:        msg = "FAULT - check pole node"; break;
+      case AS_WAIT_PERSIST: msg = "Misaligned - confirming before moving"; break;
+      case AS_MOVING:       msg = "Moving pole"; break;
+      case AS_SETTLING:     msg = "Checking result of move"; break;
+      default:              msg = poleStatus.autoOn ? "OK" : "OK (auto is OFF)"; break;
+    }
+  }
+  Serial.printf("Auto %-3s | %-10s | %-20s | %s\n", poleStatus.autoOn ? "ON" : "OFF",
+                evdStateName(poleStatus.state), err, msg);
 }
 
 void printDetail() {
@@ -251,13 +246,12 @@ void updateLed(uint32_t now) {
 void setup() {
   Serial.begin(115200);
   delay(300);
-  Serial.println("\n=== EVD leveler: TRAGUS NODE ===");
+  Serial.println("\n===== EVD LEVELER - TRAGUS NODE =====");
   if (LED_PIN >= 0) pinMode(LED_PIN, OUTPUT);
 
   Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
   Wire.setClock(I2C_CLOCK_HZ);
   sensorOk = initSensor();
-  if (!sensorOk) Serial.println("Will keep retrying sensor init every 5 s.");
 
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);          // lower latency
@@ -272,6 +266,10 @@ void loop() {
   maintainWifi(now);
   receiveStatus(now);
   updateLed(now);
+  if (poleOk(now) != poleWasOk) {
+    poleWasOk = poleOk(now);
+    Serial.println(poleWasOk ? "** Connected to pole node" : "** Lost connection to pole node");
+  }
 
   // Retry sensor init if the sensor was missing or kept failing.
   if ((!sensorOk || consecutiveReadErrors >= MAX_READ_ERRORS) &&

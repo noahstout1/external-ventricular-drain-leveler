@@ -36,7 +36,7 @@ Optional limit switches and an e-stop: set `LIMIT_TOP_PIN`, `LIMIT_BOTTOM_PIN` a
 1. Change `EVD_WIFI_SSID` / `EVD_WIFI_PASS` in `evd_protocol.h`, then copy the file into both folders.
 2. Flash both boards and open the pole node's Serial Monitor at 115200 baud with line ending set to Newline.
 3. With auto off, send `u 5`. If the pole goes **down**, set `DIR_INVERT = true`.
-4. Level the EVD to the tragus by hand. Wait until the status line shows `T_STABLE` (about 60 s of steady temperatures), then click the button once (or send `t`). If temperatures aren't stable yet, the tare waits and happens by itself once they are. At power-up the pole node starts one of these waiting tares automatically (forced after 10 min if temperatures never settle).
+4. Level the EVD to the tragus by hand. Click the button once (or send `t`). If temperatures aren't stable yet, the tare waits and happens by itself once they are. At power-up the pole node starts one of these waiting tares automatically (forced after 10 min if temperatures never settle).
 5. Double-click the button (or send `a`) to turn automatic correction on. Double-click again to turn it off.
 
 ## Button
@@ -51,7 +51,7 @@ Clicks must be under 0.4 s apart; holds longer than 1.5 s are ignored. No automa
 ## Correction limits
 - After each correction cycle, the next one can't start for 60 s (`CORRECTION_COOLDOWN_MS`). Turning auto on resets this.
 - One cycle may move the pole at most 50 mm (`MAX_CYCLE_MOVE_MM`); more raises a `CYCLE_LIMIT` fault.
-- `TEMP_DRIFT` appears once either sensor is 0.5 °C away from its temperature at tare (`MAX_TEMP_DRIFT_FROM_TARE_C`). Auto stops correcting until you level by hand and tare again.
+- `Temperature drifted` (`TEMP_DRIFT` in verbose mode) appears once either sensor is 0.5 °C away from its temperature at tare (`MAX_TEMP_DRIFT_FROM_TARE_C`). Auto stops correcting until you level by hand and tare again.
 
 ## Getting a good tare
 - **Draft shields:** cover each BMP581 with a small cap that blocks air movement but not static pressure, e.g. a 3D-printed or film-canister cap with a ~1 mm vent hole or a plug of open-cell foam over the opening. Don't seal it airtight and don't press anything on the chip.
@@ -61,7 +61,24 @@ Clicks must be under 0.4 s apart; holds longer than 1.5 s are ignored. No automa
 - Tare only once `T_STABLE` shows (the button's waiting tare does this for you).
 
 ## Pole node commands
-`t` tare · `T` force tare · `a` auto on/off · `u <mm>` / `d <mm>` jog · `s` stop · `c` clear faults · `z` zero position · `r` raw CSV · `p` details · `h` help
+`t` tare · `T` force tare · `a` auto on/off · `u <mm>` / `d <mm>` jog · `s` stop · `c` clear faults · `z` zero position · `r` raw CSV · `p` details · `v` verbose status · `h` help
+
+## Reading the Serial Monitor
+Every 2 s the pole node prints one status line:
+
+```
+Auto ON  | WATCHING   | EVD level (+0.3 cm)  | pole   +0.0 mm | OK
+```
+
+| Column | Meaning |
+|---|---|
+| `Auto ON/OFF` | Whether automatic correction is on |
+| State | `OFF`, `WATCHING` (aligned, monitoring), `CONFIRMING` (misaligned, waiting 5 s), `MOVING`, `SETTLING` (checking the move), `FAULT` |
+| `EVD ...` | `level` within 0.5 cm, otherwise how far the EVD is `HIGH` or `LOW`; `--` before tare or without data |
+| `pole` | Pole position from power-up |
+| Last column | The one thing to know or fix right now, in words |
+
+Lines starting with `**` are events (tare done, correction started, aligned, faults). The tragus node prints the same summary without the pole position. For debugging, `v` switches to the detailed line with every flag, `p` prints raw pressures/temperatures and settings, and `r` streams raw CSV data.
 
 ## Before any clinical use
 - Measure each sensor's temperature coefficient on the bench and set `TCO_TRAGUS_PA_PER_K` / `TCO_EVD_PA_PER_K`. Skin warming of the tragus sensor is the largest error source (~4 cm per 0.5 Pa of drift).

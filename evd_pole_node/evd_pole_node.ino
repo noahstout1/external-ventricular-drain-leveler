@@ -147,7 +147,7 @@ static const bool     AUTO_ON_BOOT      = false;  // safer: a person turns it on
 
 // --- Timing ---
 static const uint32_t STATUS_TX_MS    = 250;
-static const uint32_t STATUS_PRINT_MS = 1000;
+static const uint32_t STATUS_PRINT_MS = 2000;
 static const int      MAX_READ_ERRORS = 5;        // consecutive, before fault
 // =============================================================================
 
@@ -215,6 +215,8 @@ uint32_t lastCycleEndMs = 0;
 
 // ---- UI ----
 bool     rawLogging = false;
+bool     verbose = false;         // 'v': detailed status line instead of the simple one
+const char* faultReason = "";
 uint32_t lastStatusTxMs = 0, lastPrintMs = 0, lastInitTryMs = 0, lastComputeMs = 0;
 uint32_t txSeq = 0;
 String   serialLine;
@@ -291,7 +293,6 @@ float configureSensor(BMP581& s, const char* name) {
   if (s.setMode(BMP5_POWERMODE_NORMAL) != BMP5_OK) {
     Serial.printf("[%s] WARNING: could not return to normal mode\n", name);
   }
-  Serial.printf("[%s] OSR_P=128x OSR_T=8x IIR=3 ODR=%.0f Hz\n", name, hz);
   return hz;
 }
 
@@ -303,12 +304,11 @@ bool initEvdSensor() {
       evdAddr = a;
       evdOdrHz = configureSensor(sensEvd, "EVD");
       evdPeriodMs = (uint32_t)(1000.0f / evdOdrHz);
-      Serial.printf("EVD BMP581 at 0x%02X, sampling every %lu ms\n", a,
-                    (unsigned long)evdPeriodMs);
+      Serial.printf("EVD sensor OK (%.0f readings/s)\n", evdOdrHz);
       return true;
     }
   }
-  Serial.println("ERROR: EVD BMP581 not found at 0x47 or 0x46 (check wiring).");
+  Serial.println("** EVD sensor NOT FOUND - check its wiring (retrying every 5 s)");
   return false;
 }
 
@@ -336,8 +336,8 @@ void setWindowFromRate(uint16_t hzX10) {
   if (hz <= 0) hz = 1;
   windowLen = constrain((int)lroundf(AVG_WINDOW_S * hz), 3, MAX_WINDOW);
   resetWindow();
-  Serial.printf("Tragus rate %.1f Hz -> averaging %d samples (%.1f s)\n", hz,
-                windowLen, windowLen / hz);
+  if (verbose) Serial.printf("Tragus rate %.1f Hz -> averaging %d samples (%.1f s)\n", hz,
+                             windowLen, windowLen / hz);
 }
 
 void pushSample(double dp) {
@@ -462,9 +462,9 @@ const char* tareBlocker(bool force) {
 bool doTare(bool force) {
   const char* why = tareBlocker(force);
   if (why) {
-    Serial.printf("TARE REFUSED: %s (temp slopes tragus %.2f, evd %.2f C/min; "
-                  "need < %.2f and 60 s of history).\n",
-                  why, slopeTragus, slopeEvd, TEMP_STABLE_C_PER_MIN);
+    Serial.printf("** Tare not possible: %s\n", why);
+    if (verbose) Serial.printf("   temp slopes tragus %.2f, evd %.2f C/min (need < %.2f)\n",
+                               slopeTragus, slopeEvd, TEMP_STABLE_C_PER_MIN);
     return false;
   }
   double meanDp, sdDp;
@@ -475,8 +475,9 @@ bool doTare(bool force) {
   tareTempEvd    = tEvd;
   calibrated     = true;
   computeOutput(millis());
-  Serial.printf("TARE OK: offset %.2f Pa (sensor-to-sensor), Ttragus %.2f C, Tevd %.2f C\n",
-                tareOffsetPa, tareTempTragus, tareTempEvd);
+  Serial.println("** TARE DONE - current height is now 'level'");
+  if (verbose) Serial.printf("   offset %.2f Pa, Ttragus %.2f C, Tevd %.2f C\n",
+                             tareOffsetPa, tareTempTragus, tareTempEvd);
   return true;
 }
 
@@ -485,19 +486,20 @@ void startPendingTare(uint32_t now, bool byUser) {
   tarePendingByUser = byUser;
   tarePendingSinceMs = now;
   lastTareTryMs = now;
-  Serial.println("TARE WAITING: will tare automatically once temperatures are stable "
-                 "(click again / send 'T' to tare now).");
+  Serial.println(byUser
+      ? "** Tare will happen once temperatures settle (click again to tare now)"
+      : "** Will tare automatically once temperatures settle (forced after 10 min)");
 }
 
 // A person asked to tare (button click or 't'). Returns 1 = tared, 0 = refused,
 // -1 = now waiting for stable temperatures.
 int requestTare(uint32_t now, bool forceIfWaiting) {
   if (tarePending && tarePendingByUser && forceIfWaiting) {
-    Serial.println("Tare requested again while waiting: forcing now.");
+    Serial.println("** Tare forced without waiting");
     return doTare(true) ? 1 : 0;
   }
   if (tarePending && tarePendingByUser) {
-    Serial.println("Tare is already waiting for stable temperatures ('T' forces it).");
+    Serial.println("** Tare already waiting for temperatures ('T' forces it)");
     return -1;
   }
   if (tareBlocker(false) == nullptr) return doTare(false) ? 1 : 0;
@@ -511,7 +513,7 @@ void serviceTare(uint32_t now) {
   lastTareTryMs = now;
   bool timeUp = now - tarePendingSinceMs >= TARE_WAIT_MAX_MS;
   if (tareBlocker(timeUp) != nullptr) return;          // keep waiting quietly
-  if (timeUp) Serial.println("Tare: temperatures never settled within 10 min; forcing.");
+  if (timeUp) Serial.println("** Temperatures didn't settle in 10 min - taring anyway");
   if (doTare(timeUp)) ledAck(1, now);
 }
 
@@ -521,8 +523,8 @@ void enterFault(uint16_t f, const char* why) {
   latchedFaults |= f;
   state = AS_FAULT;
   if (f & AF_ESTOP) driverEnable(false);
-  Serial.printf("FAULT: %s (faults 0x%04X). Fix the cause, then send 'c'.\n",
-                why, latchedFaults);
+  faultReason = why;
+  Serial.printf("** FAULT: %s. Motor stopped. Fix the cause, then send 'c'.\n", why);
 }
 
 // Data good enough to *move* on (MF_VALID already implies calibrated + no faults).
@@ -538,17 +540,17 @@ bool requestMoveTo(float tgtMm, bool automatic) {
   if (latchedFaults & AF_ESTOP) return false;
   if (tgtMm > SOFT_LIMIT_UP_MM || tgtMm < -SOFT_LIMIT_DOWN_MM) {
     if (automatic) enterFault(AF_SOFT_LIMIT, "correction exceeds soft travel limit");
-    else Serial.println("Refused: beyond soft limit.");
+    else Serial.println("** Can't move: beyond allowed travel");
     return false;
   }
   if (tgtMm > posMm() && topLimit()) {
     if (automatic) enterFault(AF_LIMIT_TOP, "top limit switch active");
-    else Serial.println("Refused: top limit active.");
+    else Serial.println("** Can't move: top limit switch pressed");
     return false;
   }
   if (tgtMm < posMm() && bottomLimit()) {
     if (automatic) enterFault(AF_LIMIT_BOTTOM, "bottom limit switch active");
-    else Serial.println("Refused: bottom limit active.");
+    else Serial.println("** Can't move: bottom limit switch pressed");
     return false;
   }
   driverEnable(true);
@@ -567,7 +569,8 @@ void startCorrection(float errCm) {
     return;
   }
   iteration++;
-  Serial.printf("CORRECT #%d: error %+.2f cm -> move %+.1f mm\n", iteration, errCm, moveMm);
+  Serial.printf("** Correcting (try %d): moving pole %s %.1f mm\n", iteration,
+                moveMm > 0 ? "UP" : "DOWN", fabsf(moveMm));
   if (requestMoveTo(posMm() + moveMm, true)) {
     cycleMovedMm += fabsf(moveMm);
     state = AS_MOVING;
@@ -579,7 +582,7 @@ void setAuto(bool on) {
   cooldownActive = false;   // a person just turned it on: allow correcting right away
   halt();
   if (state != AS_FAULT) state = on ? AS_IDLE : AS_AUTO_OFF;
-  Serial.printf("Automatic correction %s\n", on ? "ON" : "OFF");
+  Serial.printf("** Auto mode %s\n", on ? "ON" : "OFF");
 }
 
 // Any motion (automatic or jog) invalidates the averaging window.
@@ -606,10 +609,10 @@ void safetyChecks(uint32_t now) {
   if (state == AS_MOVING) {
     if (!linkOk(now)) {
       halt(); state = AS_IDLE;
-      Serial.println("STOP: link to tragus node lost during move.");
+      Serial.println("** Stopped: lost signal from tragus node");
     } else if (measDangerous()) {
       halt(); state = AS_IDLE;
-      Serial.println("STOP: sensor reported fault/implausible/uncalibrated.");
+      Serial.println("** Stopped: sensor readings became unreliable");
     }
   }
 }
@@ -632,7 +635,8 @@ void controlStep(uint32_t now) {
         persistStartMs = now;
         persistLastUsableMs = now;
         persistSign = err > 0 ? 1 : -1;
-        Serial.printf("Misalignment %+.2f cm detected, confirming...\n", err);
+        Serial.printf("** EVD %.1f cm %s - confirming for %lu s before moving\n", fabsf(err),
+                      err > 0 ? "HIGH" : "LOW", (unsigned long)(PERSIST_MS / 1000));
       }
       break;
 
@@ -642,13 +646,15 @@ void controlStep(uint32_t now) {
         // up if trustworthy data stays away for a while.
         if (now - persistLastUsableMs > PERSIST_DROPOUT_MS) {
           state = AS_IDLE;
-          Serial.printf("Confirm aborted: no usable data for %lu ms: noise %.2f cm "
-                        "link %s (age %lu ms) window %d/%d flags:",
-                        (unsigned long)(now - persistLastUsableMs), noiseCm,
-                        linkOk(now) ? "ok" : "LOST", (unsigned long)(now - lastTragusMs),
-                        bufCount, windowLen);
-          printMeasFlags(measFlags);
-          Serial.println();
+          const char* issue = evdIssue(measFlags, 0);
+          Serial.printf("** Cancelled: %s\n", issue ? issue : "readings unreliable");
+          if (verbose) {
+            Serial.printf("   no usable data for %lu ms, noise %.2f cm, window %d/%d, flags:",
+                          (unsigned long)(now - persistLastUsableMs), noiseCm,
+                          bufCount, windowLen);
+            printMeasFlags(measFlags);
+            Serial.println();
+          }
         }
         break;
       }
@@ -656,7 +662,7 @@ void controlStep(uint32_t now) {
       int8_t sign = err > 0 ? 1 : -1;
       if (fabsf(err) <= TRIGGER_CM || sign != persistSign) {
         state = AS_IDLE;                        // error genuinely went away
-        Serial.printf("Misalignment cleared on its own (now %+.2f cm).\n", err);
+        Serial.println("** Misalignment went away on its own - no move needed");
       } else if (now - persistStartMs >= PERSIST_MS) {
         iteration = 0;
         cycleMovedMm = 0;
@@ -677,15 +683,14 @@ void controlStep(uint32_t now) {
       // reading here is built only from post-move samples.
       if (!usable) {
         if (now - settleStartMs > SETTLE_TIMEOUT_MS) {   // data never came back
-          Serial.println("No usable data after move; returning to IDLE.");
+          Serial.println("** No reliable readings after the move - stopped trying");
           state = AS_IDLE;
           cooldownActive = true; lastCycleEndMs = now;
         }
         break;
       }
       if (fabsf(err) <= TARGET_CM) {
-        Serial.printf("ALIGNED: error %+.2f cm after %d move(s), pos %+.1f mm\n",
-                      err, iteration, posMm());
+        Serial.printf("** ALIGNED (%+.1f cm) after %d move(s)\n", err, iteration);
         state = AS_IDLE;
         cooldownActive = true; lastCycleEndMs = now;
       } else if (iteration >= MAX_ITERATIONS) {
@@ -742,10 +747,11 @@ void sendStatus(uint32_t now) {
 
 // --------------------------------- UI ----------------------------------------
 void printHelp() {
-  Serial.println("Commands: t=tare  T=force tare  a=auto on/off  u <mm>=jog up  "
-                 "d <mm>=jog down  s=stop  c=clear faults  z=zero position  "
-                 "r=raw CSV  p=status  h=help");
-  Serial.println("Button: click = tare, double-click = auto on/off");
+  Serial.println("Button:   1 click = tare | 2 clicks = auto on/off");
+  Serial.println("Commands: t tare | a auto on/off | u 5 / d 5 move pole 5 mm | s stop "
+                 "| c clear fault");
+  Serial.println("Debug:    p details | v verbose status | r raw data | T force tare "
+                 "| z zero position | h help");
 }
 
 void printMeasFlags(uint16_t f) {
@@ -762,18 +768,48 @@ void printMeasFlags(uint16_t f) {
   if (!(f & MF_CALIBRATED)) Serial.print(" NEEDS_TARE");
 }
 
+uint32_t cooldownLeftS(uint32_t now) {
+  return (CORRECTION_COOLDOWN_MS - min(now - lastCycleEndMs, CORRECTION_COOLDOWN_MS)) / 1000;
+}
+
+// The one thing a person most needs to know right now.
+const char* statusMessage(uint32_t now, char* buf, size_t n) {
+  if (state == AS_FAULT) { snprintf(buf, n, "FAULT: %s (send 'c' after fixing)", faultReason); return buf; }
+  if (tarePending) return "Waiting for temperatures to settle, then tares (click = tare now)";
+  const char* issue = evdIssue(measFlags, 0);
+  if (issue) return issue;
+  switch (state) {
+    case AS_WAIT_PERSIST: return "Misaligned - confirming before moving";
+    case AS_MOVING:       return "Moving pole";
+    case AS_SETTLING:     return "Checking result of move";
+    default: break;
+  }
+  bool misaligned = fabsf(heightErrCm) > TRIGGER_CM;
+  if (!autoEnabled) return misaligned ? "Misaligned (auto is OFF)" : "OK (auto is OFF)";
+  if (cooldownActive) { snprintf(buf, n, "OK - next check in %lu s", (unsigned long)cooldownLeftS(now)); return buf; }
+  return "OK";
+}
+
+// Simple line (default):  Auto ON  | WATCHING   | EVD level (+0.3 cm)  | pole  +12.0 mm | OK
+// Verbose line ('v'): every flag and raw number, for debugging.
 void printStatusLine(uint32_t now) {
-  Serial.printf("%-8s auto:%s pos %+7.2f mm | err %+6.2f cm (+-%.2f) |",
-                evdStateName(state), autoEnabled ? "ON " : "OFF", posMm(),
-                heightErrCm, noiseCm);
-  printMeasFlags(measFlags);
-  if (tarePending) Serial.print(" | TARE WAITING");
-  if (cooldownActive && state == AS_IDLE)
-    Serial.printf(" | cooldown %lus",
-                  (unsigned long)((CORRECTION_COOLDOWN_MS - min(now - lastCycleEndMs,
-                                                                CORRECTION_COOLDOWN_MS)) / 1000));
-  if (latchedFaults) Serial.printf(" | FAULTS 0x%04X", latchedFaults);
-  Serial.printf(" | clients %d\n", WiFi.softAPgetStationNum());
+  if (verbose) {
+    Serial.printf("%-10s auto:%s pos %+7.2f mm | err %+6.2f cm (+-%.2f) |",
+                  evdStateName(state), autoEnabled ? "ON " : "OFF", posMm(),
+                  heightErrCm, noiseCm);
+    printMeasFlags(measFlags);
+    if (tarePending) Serial.print(" | TARE WAITING");
+    if (cooldownActive && state == AS_IDLE)
+      Serial.printf(" | cooldown %lus", (unsigned long)cooldownLeftS(now));
+    if (latchedFaults) Serial.printf(" | FAULTS 0x%04X", latchedFaults);
+    Serial.printf(" | clients %d\n", WiFi.softAPgetStationNum());
+    return;
+  }
+  char err[32], msg[80];
+  evdDescribeError(err, sizeof(err), heightErrCm, measFlags, TARGET_CM);
+  Serial.printf("Auto %-3s | %-10s | %-20s | pole %+6.1f mm | %s\n",
+                autoEnabled ? "ON" : "OFF", evdStateName(state), err, posMm(),
+                statusMessage(now, msg, sizeof(msg)));
 }
 
 void printDetail() {
@@ -809,25 +845,26 @@ void handleCommand(String cmd) {
     case 'T': doTare(true); break;
     case 'a': setAuto(!autoEnabled); break;
     case 'u': case 'd': {
-      if (autoEnabled) { Serial.println("Turn auto off ('a') before jogging."); break; }
-      if (state == AS_FAULT) { Serial.println("Clear faults ('c') first."); break; }
-      if (arg <= 0 || arg > 50) { Serial.println("Usage: u 5   (0 < mm <= 50)"); break; }
+      if (autoEnabled) { Serial.println("** Turn auto off first (double-click or 'a')"); break; }
+      if (state == AS_FAULT) { Serial.println("** Clear the fault first ('c')"); break; }
+      if (arg <= 0 || arg > 50) { Serial.println("** Usage: u 5  (moves 5 mm, max 50)"); break; }
       float tgt = posMm() + (c == 'u' ? arg : -arg);
-      if (requestMoveTo(tgt, false)) Serial.printf("Jog to %+.1f mm\n", tgt);
+      if (requestMoveTo(tgt, false))
+        Serial.printf("** Moving pole %s %.1f mm\n", c == 'u' ? "UP" : "DOWN", arg);
       break;
     }
-    case 's': halt(); if (state == AS_MOVING) state = AS_IDLE; Serial.println("Stopped."); break;
+    case 's': halt(); if (state == AS_MOVING) state = AS_IDLE; Serial.println("** Stopped"); break;
     case 'c':
       latchedFaults = 0;
       if (estop()) { enterFault(AF_ESTOP, "E-STOP still pressed"); break; }
       driverEnable(HOLD_WHEN_IDLE);
       state = autoEnabled ? AS_IDLE : AS_AUTO_OFF;
-      Serial.println("Faults cleared.");
+      Serial.println("** Fault cleared");
       break;
     case 'z':
-      if (isMoving()) { Serial.println("Stop first."); break; }
+      if (isMoving()) { Serial.println("** Stop first ('s')"); break; }
       stepper.setCurrentPosition(0);
-      Serial.println("Position zeroed (soft limits now relative to here).");
+      Serial.println("** Pole position set to 0 mm (travel limits now measured from here)");
       break;
     case 'r':
       rawLogging = !rawLogging;
@@ -835,8 +872,12 @@ void handleCommand(String cmd) {
         Serial.println("ms,p_tragus_pa,p_evd_pa,t_tragus_c,t_evd_c,dp_raw_pa,err_cm,flags");
       break;
     case 'p': printDetail(); break;
+    case 'v':
+      verbose = !verbose;
+      Serial.printf("** Verbose status %s\n", verbose ? "ON" : "OFF");
+      break;
     case 'h': case '?': printHelp(); break;
-    default: Serial.println("Unknown command, 'h' for help."); break;
+    default: Serial.println("** Unknown command - send 'h' for help"); break;
   }
 }
 
@@ -881,17 +922,15 @@ void handleButton(uint32_t now) {
   btnClicks = 0;
   btnLongPress = false;
   if (longPress) {
-    Serial.println("Button: held too long, ignored (click = tare, double-click = auto).");
+    Serial.println("** Button held too long - ignored");
   } else if (clicks == 1) {
-    Serial.println("Button: 1 click -> tare");
     int r = requestTare(now, true);
     if (r >= 0) ledAck(r == 1 ? 1 : 0, now);   // waiting: LED shows the waiting blip
   } else if (clicks == 2) {
-    Serial.println("Button: 2 clicks -> toggle auto");
     setAuto(!autoEnabled);
     ledAck(autoEnabled ? 2 : 3, now);
   } else {
-    Serial.printf("Button: %u clicks ignored (click = tare, double-click = auto).\n", clicks);
+    Serial.printf("** %u clicks ignored (1 = tare, 2 = auto on/off)\n", clicks);
     ledAck(0, now);
   }
 }
@@ -926,7 +965,7 @@ void setup() {
   Serial.setTxBufferSize(1024);
   Serial.begin(115200);
   delay(300);
-  Serial.println("\n=== EVD leveler: POLE NODE ===");
+  Serial.println("\n===== EVD LEVELER - POLE NODE =====");
 
   if (ENA_PIN >= 0) pinMode(ENA_PIN, OUTPUT);
   driverEnable(HOLD_WHEN_IDLE);
@@ -946,23 +985,20 @@ void setup() {
   Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
   Wire.setClock(I2C_CLOCK_HZ);
   evdOk = initEvdSensor();
-  if (!evdOk) Serial.println("Will keep retrying sensor init every 5 s.");
 
   WiFi.mode(WIFI_AP);
   WiFi.setSleep(false);
   // max 1 client: only the tragus node may join
   if (!WiFi.softAP(EVD_WIFI_SSID, EVD_WIFI_PASS, EVD_WIFI_CHANNEL, 0, 1)) {
-    Serial.println("ERROR: could not start WiFi access point.");
+    Serial.println("** WiFi could NOT start - restart the board");
   }
   udp.begin(EVD_UDP_PORT_POLE);
-  Serial.printf("AP \"%s\" up at %s, listening on UDP %d\n", EVD_WIFI_SSID,
-                WiFi.softAPIP().toString().c_str(), EVD_UDP_PORT_POLE);
+  Serial.printf("WiFi network \"%s\" ready - waiting for tragus node\n", EVD_WIFI_SSID);
 
   state = autoEnabled ? AS_IDLE : AS_AUTO_OFF;
   if (ESTOP_PIN >= 0 && estop()) enterFault(AF_ESTOP, "E-STOP active at boot");
   printHelp();
-  Serial.println("Level the EVD to the tragus by hand. The node tares itself once both "
-                 "sensor temperatures are stable (forced after 10 min).");
+  Serial.println("Level the EVD to the tragus by hand.");
   startPendingTare(millis(), false);
 }
 
@@ -985,6 +1021,11 @@ void loop() {
 
   receivePackets(now);
   stepper.run();
+  static bool tragusWasOk = false;
+  if (linkOk(now) != tragusWasOk) {
+    tragusWasOk = linkOk(now);
+    Serial.println(tragusWasOk ? "** Tragus node connected" : "** Lost signal from tragus node");
+  }
   // Keep link/fault flags current even when no tragus packets arrive.
   if (now - lastComputeMs >= 100) { lastComputeMs = now; computeOutput(now); }
   trackMotion(now);
