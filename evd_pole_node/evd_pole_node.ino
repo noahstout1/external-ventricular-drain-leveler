@@ -93,7 +93,7 @@ static const float MOTOR_FULL_STEPS = 200.0f;     // 1.8 deg motor
 static const float MICROSTEPS       = 8.0f;       // MUST match TB6600 DIP switches
 static const float LEAD_MM_PER_REV  = 2.0f;       // TR8x2 = 2 mm per revolution
 static const float STEPS_PER_MM = MOTOR_FULL_STEPS * MICROSTEPS / LEAD_MM_PER_REV; // 800
-static const bool  DIR_INVERT = false;  // flip if "u" moves the pole DOWN
+static const bool  DIR_INVERT = true;   // flip if "u" moves the pole DOWN (set: motor ran reversed on our rig)
 static const float MAX_SPEED_MM_S = 3.0f;
 static const float ACCEL_MM_S2    = 3.0f;
 
