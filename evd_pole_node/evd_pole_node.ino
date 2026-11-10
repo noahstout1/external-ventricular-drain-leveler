@@ -93,13 +93,13 @@ static const float MOTOR_FULL_STEPS = 200.0f;     // 1.8 deg motor
 static const float MICROSTEPS       = 8.0f;       // MUST match TB6600 DIP switches
 static const float LEAD_MM_PER_REV  = 2.0f;       // TR8x2 = 2 mm per revolution
 static const float STEPS_PER_MM = MOTOR_FULL_STEPS * MICROSTEPS / LEAD_MM_PER_REV; // 800
-static const bool  DIR_INVERT = false;  // flip if "u" moves the pole DOWN
+static const bool  DIR_INVERT = true;   // flip if "u" moves the pole DOWN (set: motor ran reversed on our rig)
 static const float MAX_SPEED_MM_S = 3.0f;
 static const float ACCEL_MM_S2    = 3.0f;
 
 // --- Travel limits (relative to power-on position or last 'z') ---
-static const float SOFT_LIMIT_UP_MM   = 150.0f;
-static const float SOFT_LIMIT_DOWN_MM = 150.0f;
+static const float SOFT_LIMIT_UP_MM   = 200.0f;
+static const float SOFT_LIMIT_DOWN_MM = 200.0f;
 
 // --- Filtering ---
 static const float AVG_WINDOW_S = 3.0f;      // moving-average length
@@ -139,7 +139,7 @@ static const uint32_t SETTLE_TIMEOUT_MS = 30000;  // give up waiting for fresh d
 static const float    GAIN              = 0.9f;   // <1 avoids overshoot from noise
 static const float    MIN_MOVE_MM       = 0.5f;
 static const int      MAX_ITERATIONS    = 4;      // per correction cycle
-static const float    MAX_CYCLE_MOVE_MM = 50.0f;  // fault if one cycle needs more travel
+static const float    MAX_CYCLE_MOVE_MM = 200.0f;  // fault if one cycle needs more travel
 static const uint32_t CORRECTION_COOLDOWN_MS = 60000; // min gap between correction cycles
 static const uint32_t TARE_WAIT_MAX_MS  = 600000; // waiting tare is forced after 10 min
 static const uint32_t LINK_TIMEOUT_MS   = 1500;   // tragus packets must arrive this often

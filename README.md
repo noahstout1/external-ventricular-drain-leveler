@@ -50,7 +50,7 @@ Clicks must be under 0.4 s apart; holds longer than 1.5 s are ignored. No automa
 
 ## Correction limits
 - After each correction cycle, the next one can't start for 60 s (`CORRECTION_COOLDOWN_MS`). Turning auto on resets this.
-- One cycle may move the pole at most 50 mm (`MAX_CYCLE_MOVE_MM`); more raises a `CYCLE_LIMIT` fault.
+- One cycle may move the pole at most 200 mm (`MAX_CYCLE_MOVE_MM`); more raises a `CYCLE_LIMIT` fault.
 - `Temperature drifted` (`TEMP_DRIFT` in verbose mode) appears once either sensor is 0.5 °C away from its temperature at tare (`MAX_TEMP_DRIFT_FROM_TARE_C`). Auto stops correcting until you level by hand and tare again.
 
 ## Getting a good tare
