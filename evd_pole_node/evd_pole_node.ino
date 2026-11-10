@@ -98,8 +98,8 @@ static const float MAX_SPEED_MM_S = 3.0f;
 static const float ACCEL_MM_S2    = 3.0f;
 
 // --- Travel limits (relative to power-on position or last 'z') ---
-static const float SOFT_LIMIT_UP_MM   = 150.0f;
-static const float SOFT_LIMIT_DOWN_MM = 150.0f;
+static const float SOFT_LIMIT_UP_MM   = 200.0f;
+static const float SOFT_LIMIT_DOWN_MM = 200.0f;
 
 // --- Filtering ---
 static const float AVG_WINDOW_S = 3.0f;      // moving-average length
