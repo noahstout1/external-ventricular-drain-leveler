@@ -175,6 +175,48 @@ bool poleOk(uint32_t now) {
   return havePoleStatus && now - lastPoleStatusMs < POLE_TIMEOUT_MS;
 }
 
+// --------------------- Plain-language status text ----------------------------
+// Kept in this sketch (not evd_protocol.h) so an older copy of the header in
+// the sketch folder still compiles.
+const char* stateText(uint8_t s) {
+  switch (s) {
+    case AS_AUTO_OFF:     return "OFF";
+    case AS_IDLE:         return "WATCHING";
+    case AS_WAIT_PERSIST: return "CONFIRMING";
+    case AS_MOVING:       return "MOVING";
+    case AS_SETTLING:     return "SETTLING";
+    case AS_FAULT:        return "FAULT";
+    default:              return "?";
+  }
+}
+
+// The single most important problem, in words, or nullptr if there is none.
+const char* issueText(uint16_t f, uint16_t faults) {
+  if (faults & AF_ESTOP)                         return "E-STOP pressed";
+  if (faults & (AF_LIMIT_TOP | AF_LIMIT_BOTTOM)) return "Limit switch hit";
+  if (faults & AF_SOFT_LIMIT)                    return "Pole at end of allowed travel";
+  if (faults & AF_NO_CONVERGE)                   return "Could not align after several tries";
+  if (faults & AF_CYCLE_LIMIT)                   return "Correction needed too much travel";
+  if (f & MF_TRAGUS_LINK)                        return "No signal from tragus node";
+  if (f & MF_SENSOR_FAULT)                       return "EVD sensor not responding";
+  if (f & MF_TRAGUS_FAULT)                       return "Tragus sensor not responding";
+  if (!(f & MF_CALIBRATED))                      return "Needs tare (click button)";
+  if (f & MF_WARMING_UP)                         return "Collecting readings";
+  if (f & MF_TEMP_DRIFT)                         return "Temperature drifted: level by hand, then tare";
+  if (f & MF_IMPLAUSIBLE)                        return "Error too large: check sensors";
+  if (f & MF_NOISY)                              return "Readings unsteady (draft or movement)";
+  return nullptr;
+}
+
+// Writes "EVD level (+0.3 cm)", "EVD 2.1 cm HIGH", "EVD 1.8 cm LOW" or "EVD --".
+void errorText(char* buf, size_t n, float errCm, uint16_t f, float levelBandCm) {
+  bool have = (f & MF_CALIBRATED) &&
+              !(f & (MF_SENSOR_FAULT | MF_TRAGUS_LINK | MF_TRAGUS_FAULT | MF_WARMING_UP));
+  if (!have)                            snprintf(buf, n, "EVD --");
+  else if (fabsf(errCm) <= levelBandCm) snprintf(buf, n, "EVD level (%+.1f cm)", errCm);
+  else snprintf(buf, n, "EVD %.1f cm %s", fabsf(errCm), errCm > 0 ? "HIGH" : "LOW");
+}
+
 // ------------------------------- UI / Serial ---------------------------------
 void printHelp() {
   Serial.println("Tare and auto on/off are done with the button on the POLE node.");
@@ -191,9 +233,9 @@ void printStatusLine(uint32_t now) {
     return;
   }
   char err[32];
-  evdDescribeError(err, sizeof(err), poleStatus.heightErrorCm, poleStatus.measFlags,
+  errorText(err, sizeof(err), poleStatus.heightErrorCm, poleStatus.measFlags,
                    LEVEL_BAND_CM);
-  const char* msg = evdIssue(poleStatus.measFlags, poleStatus.faults & ~AF_LINK_LOST);
+  const char* msg = issueText(poleStatus.measFlags, poleStatus.faults & ~AF_LINK_LOST);
   if (!msg) {
     switch (poleStatus.state) {
       case AS_FAULT:        msg = "FAULT - check pole node"; break;
@@ -204,7 +246,7 @@ void printStatusLine(uint32_t now) {
     }
   }
   Serial.printf("Auto %-3s | %-10s | %-20s | %s\n", poleStatus.autoOn ? "ON" : "OFF",
-                evdStateName(poleStatus.state), err, msg);
+                stateText(poleStatus.state), err, msg);
 }
 
 void printDetail() {

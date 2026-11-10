@@ -228,6 +228,48 @@ uint8_t  ledAckFlashes = 0;               // LED confirmation after a button act
 uint32_t ledAckStartMs = 0;
 bool     ledAckActive = false;
 
+// --------------------- Plain-language status text ----------------------------
+// Kept in this sketch (not evd_protocol.h) so an older copy of the header in
+// the sketch folder still compiles.
+const char* stateText(uint8_t s) {
+  switch (s) {
+    case AS_AUTO_OFF:     return "OFF";
+    case AS_IDLE:         return "WATCHING";
+    case AS_WAIT_PERSIST: return "CONFIRMING";
+    case AS_MOVING:       return "MOVING";
+    case AS_SETTLING:     return "SETTLING";
+    case AS_FAULT:        return "FAULT";
+    default:              return "?";
+  }
+}
+
+// The single most important problem, in words, or nullptr if there is none.
+const char* issueText(uint16_t f, uint16_t faults) {
+  if (faults & AF_ESTOP)                         return "E-STOP pressed";
+  if (faults & (AF_LIMIT_TOP | AF_LIMIT_BOTTOM)) return "Limit switch hit";
+  if (faults & AF_SOFT_LIMIT)                    return "Pole at end of allowed travel";
+  if (faults & AF_NO_CONVERGE)                   return "Could not align after several tries";
+  if (faults & AF_CYCLE_LIMIT)                   return "Correction needed too much travel";
+  if (f & MF_TRAGUS_LINK)                        return "No signal from tragus node";
+  if (f & MF_SENSOR_FAULT)                       return "EVD sensor not responding";
+  if (f & MF_TRAGUS_FAULT)                       return "Tragus sensor not responding";
+  if (!(f & MF_CALIBRATED))                      return "Needs tare (click button)";
+  if (f & MF_WARMING_UP)                         return "Collecting readings";
+  if (f & MF_TEMP_DRIFT)                         return "Temperature drifted: level by hand, then tare";
+  if (f & MF_IMPLAUSIBLE)                        return "Error too large: check sensors";
+  if (f & MF_NOISY)                              return "Readings unsteady (draft or movement)";
+  return nullptr;
+}
+
+// Writes "EVD level (+0.3 cm)", "EVD 2.1 cm HIGH", "EVD 1.8 cm LOW" or "EVD --".
+void errorText(char* buf, size_t n, float errCm, uint16_t f, float levelBandCm) {
+  bool have = (f & MF_CALIBRATED) &&
+              !(f & (MF_SENSOR_FAULT | MF_TRAGUS_LINK | MF_TRAGUS_FAULT | MF_WARMING_UP));
+  if (!have)                            snprintf(buf, n, "EVD --");
+  else if (fabsf(errCm) <= levelBandCm) snprintf(buf, n, "EVD level (%+.1f cm)", errCm);
+  else snprintf(buf, n, "EVD %.1f cm %s", fabsf(errCm), errCm > 0 ? "HIGH" : "LOW");
+}
+
 // ------------------------------- Helpers -------------------------------------
 float posMm()    { return stepper.currentPosition() / STEPS_PER_MM; }
 float targetMm() { return stepper.targetPosition() / STEPS_PER_MM; }
@@ -646,7 +688,7 @@ void controlStep(uint32_t now) {
         // up if trustworthy data stays away for a while.
         if (now - persistLastUsableMs > PERSIST_DROPOUT_MS) {
           state = AS_IDLE;
-          const char* issue = evdIssue(measFlags, 0);
+          const char* issue = issueText(measFlags, 0);
           Serial.printf("** Cancelled: %s\n", issue ? issue : "readings unreliable");
           if (verbose) {
             Serial.printf("   no usable data for %lu ms, noise %.2f cm, window %d/%d, flags:",
@@ -776,7 +818,7 @@ uint32_t cooldownLeftS(uint32_t now) {
 const char* statusMessage(uint32_t now, char* buf, size_t n) {
   if (state == AS_FAULT) { snprintf(buf, n, "FAULT: %s (send 'c' after fixing)", faultReason); return buf; }
   if (tarePending) return "Waiting for temperatures to settle, then tares (click = tare now)";
-  const char* issue = evdIssue(measFlags, 0);
+  const char* issue = issueText(measFlags, 0);
   if (issue) return issue;
   switch (state) {
     case AS_WAIT_PERSIST: return "Misaligned - confirming before moving";
@@ -795,7 +837,7 @@ const char* statusMessage(uint32_t now, char* buf, size_t n) {
 void printStatusLine(uint32_t now) {
   if (verbose) {
     Serial.printf("%-10s auto:%s pos %+7.2f mm | err %+6.2f cm (+-%.2f) |",
-                  evdStateName(state), autoEnabled ? "ON " : "OFF", posMm(),
+                  stateText(state), autoEnabled ? "ON " : "OFF", posMm(),
                   heightErrCm, noiseCm);
     printMeasFlags(measFlags);
     if (tarePending) Serial.print(" | TARE WAITING");
@@ -806,9 +848,9 @@ void printStatusLine(uint32_t now) {
     return;
   }
   char err[32], msg[80];
-  evdDescribeError(err, sizeof(err), heightErrCm, measFlags, TARGET_CM);
+  errorText(err, sizeof(err), heightErrCm, measFlags, TARGET_CM);
   Serial.printf("Auto %-3s | %-10s | %-20s | pole %+6.1f mm | %s\n",
-                autoEnabled ? "ON" : "OFF", evdStateName(state), err, posMm(),
+                autoEnabled ? "ON" : "OFF", stateText(state), err, posMm(),
                 statusMessage(now, msg, sizeof(msg)));
 }
 

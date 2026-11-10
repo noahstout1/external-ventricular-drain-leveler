@@ -3,8 +3,6 @@
 // If you change anything here, copy it to both folders and bump EVD_PROTO_VERSION.
 #pragma once
 #include <stdint.h>
-#include <stdio.h>
-#include <math.h>
 
 // ---------------- System layout ----------------
 //   TRAGUS node : ESP32 + BMP581 taped at the patient's tragus. Streams raw
@@ -98,40 +96,12 @@ struct __attribute__((packed)) EvdStatusPacket {
 
 inline const char* evdStateName(uint8_t s) {
   switch (s) {
-    case AS_AUTO_OFF:     return "OFF";
-    case AS_IDLE:         return "WATCHING";
-    case AS_WAIT_PERSIST: return "CONFIRMING";
+    case AS_AUTO_OFF:     return "AUTO_OFF";
+    case AS_IDLE:         return "IDLE";
+    case AS_WAIT_PERSIST: return "WAIT";
     case AS_MOVING:       return "MOVING";
     case AS_SETTLING:     return "SETTLING";
     case AS_FAULT:        return "FAULT";
     default:              return "?";
   }
-}
-
-// ---------------- Plain-language status (shared by both nodes' Serial output) ----------------
-// The single most important problem, in words, or nullptr if there is none.
-inline const char* evdIssue(uint16_t f, uint16_t faults) {
-  if (faults & AF_ESTOP)                         return "E-STOP pressed";
-  if (faults & (AF_LIMIT_TOP | AF_LIMIT_BOTTOM)) return "Limit switch hit";
-  if (faults & AF_SOFT_LIMIT)                    return "Pole at end of allowed travel";
-  if (faults & AF_NO_CONVERGE)                   return "Could not align after several tries";
-  if (faults & AF_CYCLE_LIMIT)                   return "Correction needed too much travel";
-  if (f & MF_TRAGUS_LINK)                        return "No signal from tragus node";
-  if (f & MF_SENSOR_FAULT)                       return "EVD sensor not responding";
-  if (f & MF_TRAGUS_FAULT)                       return "Tragus sensor not responding";
-  if (!(f & MF_CALIBRATED))                      return "Needs tare (click button)";
-  if (f & MF_WARMING_UP)                         return "Collecting readings";
-  if (f & MF_TEMP_DRIFT)                         return "Temperature drifted: level by hand, then tare";
-  if (f & MF_IMPLAUSIBLE)                        return "Error too large: check sensors";
-  if (f & MF_NOISY)                              return "Readings unsteady (draft or movement)";
-  return nullptr;
-}
-
-// Writes "EVD level (+0.3 cm)", "EVD 2.1 cm HIGH", "EVD 1.8 cm LOW" or "EVD --".
-inline void evdDescribeError(char* buf, size_t n, float errCm, uint16_t f, float levelBandCm) {
-  bool have = (f & MF_CALIBRATED) &&
-              !(f & (MF_SENSOR_FAULT | MF_TRAGUS_LINK | MF_TRAGUS_FAULT | MF_WARMING_UP));
-  if (!have)                           snprintf(buf, n, "EVD --");
-  else if (fabsf(errCm) <= levelBandCm) snprintf(buf, n, "EVD level (%+.1f cm)", errCm);
-  else snprintf(buf, n, "EVD %.1f cm %s", fabsf(errCm), errCm > 0 ? "HIGH" : "LOW");
 }
