@@ -4,7 +4,7 @@ Changes to Clamp_A_ElectroCookie_6Hole_ScrewMount / Clamp_B_with_MotorDriver_Tra
   * Pole bore 22.0 -> 19.0 mm (the IV pole is 19 mm where this clamp sits).
   * M5 holes: part A gets 4.2 mm pilots so M5 screws self-thread into it;
     part B keeps 5.5 mm clearance (screw heads go on B's outside).
-  * The breadboard (ElectroCookie) holder moves off part A and hangs, upside
+  * The protoboard holder moves off part A and hangs, upside
     down, under part B's TB6600 tray. Screwdriver holes line up with the tray's
     four mounting holes.
 Lead-screw hole (10.6 mm, 36 mm from the pole axis) and bolt pattern unchanged.
@@ -31,7 +31,7 @@ OLD_HOLE_R   = 2.75
 PILOT_D      = 4.2         # M5 self-tapping pilot in PETG/PLA
 THREAD_DEPTH = 11.9        # plastic between split face and the old nut slot
 TRAY_FLOOR_BOTTOM = -31.0
-BOARD_TOP    = -18.9       # top of the breadboard holder's walls on the original part A
+BOARD_TOP    = -18.9       # top of the protoboard holder's walls on the original part A
 TRAY_LOWEST  = -43.0       # lowest point of part B (gussets near the block)
 TRAY_HOLES   = [(-12.6, 35.8), (48.7, 35.8), (-12.6, 76.2), (48.7, 76.2)]
 ACCESS_R     = 4.0
