@@ -1,0 +1,27 @@
+# Nut clamp (on the 19 mm section of the IV pole)
+
+Revised from the team's `Clamp_A_ElectroCookie_6Hole_ScrewMount` / `Clamp_B_with_MotorDriver_Tray` (repo root) by `modify_nut_clamp.py`:
+
+| | Original | Revised |
+|---|---|---|
+| Pole bore | 22.0 mm | **19.0 mm** (snug on the 19 mm section) |
+| M5 holes, part A | 5.5 mm + nut slots | **4.2 mm pilots**: M5 screws self-thread into A |
+| M5 holes, part B | 5.5 mm | 5.5 mm clearance (screw heads go on B's outside) |
+| Breadboard holder | on part A | **upside down under part B's TB6600 tray** |
+| Lead-screw hole | 10.6 mm, 36 mm from pole axis | unchanged (matches the motor clamp) |
+
+Why only one half is threaded: if the screw threaded into both halves, it would lock into the first one and could never pull the halves together. Clearance on B + threads in A is what lets the screw clamp.
+
+## Files
+- `Nut_Clamp_A_Threaded.stl`: plain half, 4.2 mm pilot holes.
+- `Nut_Clamp_B_DriverTray_BoardUnder.stl`: half with the TB6600 tray on top and the ElectroCookie holder hanging underneath (its six screw bosses face down, so the board screws on upside down). Four 8 mm holes in the holder line up with the tray's TB6600 mounting holes so a screwdriver can still reach them.
+- Both are in print orientation (split face on the bed). The original STEP files in the repo root were **not** updated.
+
+## Hardware
+- 4x **M5 x 30 mm** screws, inserted from part B's outside and threaded into part A (about 11 mm of thread).
+- The TB6600 and the breadboard use the same screws as before.
+
+## Assembly
+1. Screw the TB6600 into the tray first (through the access holes in the holder), then screw the breadboard onto the holder upside down.
+2. Put both halves around the 19 mm section with the lead-screw half-holes lined up, and drive the four M5 screws in evenly. The first time, go slowly; the screw cuts its own thread.
+3. Rotate the nut clamp on the pole so its lead-screw hole sits directly above the motor clamp's motor shaft (36 mm from the pole's center at both clamps), and fit the TR8 nut.

@@ -1,8 +1,13 @@
 """NEMA 17 motor clamp for an IV pole -> two printable STL parts.
 
-Part A: half collar + horizontal motor plate (with side ribs).
+Part A: half collar + motor plate flush with one end of the collar (with side ribs).
 Part B: other half collar with M5 nut traps.
-The halves are pulled together around the pole by 4x M5 bolts.
+The halves are pulled together around the pole by 4x M5 bolts (heads on A, nuts in B).
+
+Sits on the 29 mm section of the IV pole. The lead screw is 36 mm from the pole
+axis, the same as the nut clamp (hardware/nut_clamp) on the 19 mm section, so the
+screw stays parallel to the pole between the two. The motor bolts to the OUTSIDE
+face of the plate, beyond the collar, and its shaft runs alongside the collar.
 
 Usage:  python make_clamp.py [pole_radius_mm] [out_name]
 Needs:  pip install manifold3d numpy
@@ -14,34 +19,40 @@ import numpy as np
 from manifold3d import CrossSection, Manifold
 
 # ----------------------------- parameters (mm) -----------------------------
-POLE_R      = float(sys.argv[1]) if len(sys.argv) > 1 else 29.0
+POLE_R      = float(sys.argv[1]) if len(sys.argv) > 1 else 14.5   # 29 mm pole section
+LEAD_OFFSET = 36.0    # lead-screw axis to pole axis; must equal the nut clamp's (36 mm)
+COUPLER_R   = 10.5    # 5x8 mm shaft coupler is ~20 mm across; must clear the collar
 NAME        = sys.argv[2] if len(sys.argv) > 2 else "motor_clamp"
 FIT_CLEAR   = 0.2     # added to the bore radius so it slides on before tightening
-SPLIT_GAP   = 1.0     # each half stops this far from the split plane (2 mm squeeze room)
+SPLIT_GAP   = 1.5     # each half stops this far from the split plane (3 mm squeeze room)
 WALL        = 6.0     # collar wall thickness
-H           = 40.0    # collar height (taller = more grip against slipping)
+H           = 50.0    # collar height: taller = less rocking, so the motor stays parallel
 EAR_T       = 10.0    # thickness of each bolt ear, measured from the split plane
 BOLT_D      = 5.5     # M5 clearance
-BOLT_Z      = (9.0, 25.0)
+BOLT_Z      = (10.0, 40.0)  # far apart so the halves can't hinge
 NUT_AF      = 8.4     # M5 nut across-flats + clearance
 NUT_DEPTH   = 4.5
+HEAD_CLEAR  = 6.5     # bolt axis this far outside the motor plate, so the bolt
+                      # head and screwdriver have a straight, clear path
 
 MOTOR_W     = 42.3    # NEMA 17 body
-MOTOR_GAP   = 2.0     # motor body to collar clearance
 HOLE_SPACE  = 31.0    # NEMA 17 bolt pattern
 M3_D        = 3.4
 BOSS_D      = 23.0    # 22 mm pilot boss + clearance (shaft passes through)
 PLATE_T     = 6.0
-PLATE_HALF  = 28.0    # plate half-width (Y); ribs sit outside the motor body
+PLATE_HALF  = 25.0    # plate half-width (Y); ribs sit outside the M3 screw heads
 RIB_T       = 5.0
 SEG         = 160
 
 bore = POLE_R + FIT_CLEAR
 ro = bore + WALL
-bolt_y = ro + 3.0
-ear_out = ro + 9.0
-motor_x = ro + MOTOR_GAP + MOTOR_W / 2      # lead-screw axis distance from pole axis
+bolt_y = max(ro + 3.0, PLATE_HALF + HEAD_CLEAR)
+ear_out = bolt_y + 6.0
+motor_x = LEAD_OFFSET                       # lead-screw axis distance from pole axis
 plate_end = motor_x + MOTOR_W / 2 + 4.0
+if motor_x - COUPLER_R < ro + 0.5:
+    sys.exit(f"Pole radius {POLE_R} is too big: the shaft coupler would hit the collar "
+             f"(collar outer radius {ro:.1f} mm, lead screw only {LEAD_OFFSET} mm out).")
 
 
 def box(x0, x1, y0, y1, z0, z1):
@@ -55,6 +66,15 @@ def cyl_z(r, z0, z1, x=0.0, y=0.0, seg=SEG):
 def cyl_x(r, x0, x1, y, z, seg=48):
     # cylinder along +Z rotated onto +X:  (x, y, z) -> (z, y, -x)
     return (Manifold.cylinder(x1 - x0, r, circular_segments=seg)
+            .rotate([0, 90, 0]).translate([x0, y, z]))
+
+
+def teardrop_x(r, x0, x1, y, z, seg=48):
+    # Horizontal hole along +X with a 45-degree point toward model -Z, which is
+    # "up" when the part is printed upside down: prints round, no sagging.
+    pts = [(r * math.cos(2 * math.pi * i / seg), r * math.sin(2 * math.pi * i / seg))
+           for i in range(seg)] + [(r * math.sqrt(2), 0.0)]   # local +x -> model -z
+    return (CrossSection([pts]).hull().extrude(x1 - x0)
             .rotate([0, 90, 0]).translate([x0, y, z]))
 
 
@@ -73,12 +93,12 @@ for s in (1, -1):
 holes = Manifold()
 for s in (1, -1):
     for z in BOLT_Z:
-        holes = holes + cyl_x(BOLT_D / 2, -EAR_T - 1, EAR_T + 1, s * bolt_y, z)
+        holes = holes + teardrop_x(BOLT_D / 2, -EAR_T - 1, EAR_T + 1, s * bolt_y, z)
 
 # --------------------------- motor plate (part A) ----------------------------
 plate = box(0, plate_end, -PLATE_HALF, PLATE_HALF, H - PLATE_T, H)
 x_rib0 = max(math.sqrt(max(ro**2 - PLATE_HALF**2, 0.0)) - 1.0, EAR_T + 3.0)
-for y0 in (MOTOR_W / 2 + 1.85, -PLATE_HALF):
+for y0 in (PLATE_HALF - RIB_T, -PLATE_HALF):
     plate = plate + rib(x_rib0, plate_end, H - PLATE_T + 0.01, 4.0, y0, RIB_T)
 
 plate_cuts = cyl_z(BOSS_D / 2, H - PLATE_T - 1, H + 1, motor_x, 0)
@@ -97,6 +117,7 @@ part_b = (collar - bore_cut - holes) ^ box(-big, -SPLIT_GAP, -big, big, -1, H + 
 nut_r = NUT_AF / 2 / math.cos(math.pi / 6)
 for s in (1, -1):
     for z in BOLT_Z:
+        # 6-sided cylinder: a corner points up in print orientation (no flat ceiling)
         part_b = part_b - cyl_x(nut_r, -EAR_T - 1, -EAR_T + NUT_DEPTH, s * bolt_y, z, seg=6)
 
 
