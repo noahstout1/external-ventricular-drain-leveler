@@ -1,13 +1,14 @@
 """NEMA 17 motor clamp for an IV pole -> two printable STL parts.
 
-Part A: half collar + motor plate flush with one end of the collar (with side ribs).
+Part A: half collar + motor plate at one end of the collar, with two side ribs.
 Part B: other half collar with M5 nut traps.
 The halves are pulled together around the pole by 4x M5 bolts (heads on A, nuts in B).
 
-Sits on the 29 mm section of the IV pole. The lead screw is 36 mm from the pole
-axis, the same as the nut clamp (hardware/nut_clamp) on the 19 mm section, so the
-screw stays parallel to the pole between the two. The motor bolts to the OUTSIDE
-face of the plate, beyond the collar, and its shaft runs alongside the collar.
+Sits on the 29 mm section of the IV pole. The motor hangs under the plate, between
+the ribs and beside the collar (the collar has a flat on that side so the motor
+clears it); its shaft points through the plate, away from the collar. The lead
+screw is 41 mm from the pole axis, the same as the nut clamp (hardware/nut_clamp)
+on the 19 mm section, so the screw stays parallel to the pole between the two.
 
 Usage:  python make_clamp.py [pole_radius_mm] [out_name]
 Needs:  pip install manifold3d numpy
@@ -20,8 +21,9 @@ from manifold3d import CrossSection, Manifold
 
 # ----------------------------- parameters (mm) -----------------------------
 POLE_R      = float(sys.argv[1]) if len(sys.argv) > 1 else 14.5   # 29 mm pole section
-LEAD_OFFSET = 36.0    # lead-screw axis to pole axis; must equal the nut clamp's (36 mm)
-COUPLER_R   = 10.5    # 5x8 mm shaft coupler is ~20 mm across; must clear the collar
+LEAD_OFFSET = 41.0    # lead-screw axis to pole axis; must equal LEAD_X in the nut clamp
+MOTOR_CLEAR = 0.75    # motor body to the collar's flat
+MIN_FLAT_WALL = 3.0   # thinnest collar wall allowed at the flat beside the motor
 NAME        = sys.argv[2] if len(sys.argv) > 2 else "motor_clamp"
 FIT_CLEAR   = 0.2     # added to the bore radius so it slides on before tightening
 SPLIT_GAP   = 1.5     # each half stops this far from the split plane (3 mm squeeze room)
@@ -40,8 +42,9 @@ HOLE_SPACE  = 31.0    # NEMA 17 bolt pattern
 M3_D        = 3.4
 BOSS_D      = 23.0    # 22 mm pilot boss + clearance (shaft passes through)
 PLATE_T     = 6.0
-PLATE_HALF  = 25.0    # plate half-width (Y); ribs sit outside the M3 screw heads
 RIB_T       = 5.0
+RIB_GAP     = 0.85    # motor body to each rib
+PLATE_HALF  = MOTOR_W / 2 + RIB_GAP + RIB_T   # ribs sit just outside the motor body
 SEG         = 160
 
 bore = POLE_R + FIT_CLEAR
@@ -50,9 +53,10 @@ bolt_y = max(ro + 3.0, PLATE_HALF + HEAD_CLEAR)
 ear_out = bolt_y + 6.0
 motor_x = LEAD_OFFSET                       # lead-screw axis distance from pole axis
 plate_end = motor_x + MOTOR_W / 2 + 4.0
-if motor_x - COUPLER_R < ro + 0.5:
-    sys.exit(f"Pole radius {POLE_R} is too big: the shaft coupler would hit the collar "
-             f"(collar outer radius {ro:.1f} mm, lead screw only {LEAD_OFFSET} mm out).")
+x_flat = motor_x - MOTOR_W / 2 - MOTOR_CLEAR  # collar is cut flat here, beside the motor
+if x_flat - bore < MIN_FLAT_WALL:
+    sys.exit(f"Pole radius {POLE_R} is too big for a {LEAD_OFFSET} mm lead-screw offset: "
+             f"the collar beside the motor would be only {x_flat - bore:.1f} mm thick.")
 
 
 def box(x0, x1, y0, y1, z0, z1):
@@ -85,7 +89,7 @@ def rib(x0, x1, z_top, z_bot, y0, t):
 
 
 # ------------------------------- collar --------------------------------------
-collar = cyl_z(ro, 0, H)
+collar = cyl_z(ro, 0, H) ^ box(-ro - 1, x_flat, -ro - 1, ro + 1, -1, H + 1)   # flat beside the motor
 for s in (1, -1):
     y0, y1 = sorted((s * (bore + 1), s * ear_out))
     collar = collar + box(-EAR_T, EAR_T, y0, y1, 0, H)

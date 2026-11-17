@@ -8,7 +8,8 @@ Revised from the team's `Clamp_A_ElectroCookie_6Hole_ScrewMount` / `Clamp_B_with
 | M5 holes, part A | 5.5 mm + nut slots | **4.2 mm pilots**: M5 screws self-thread into A |
 | M5 holes, part B | 5.5 mm | 5.5 mm clearance (screw heads go on B's outside) |
 | Protoboard holder | on part A | **upside down under part B's TB6600 tray** |
-| Lead-screw hole | 10.6 mm, 36 mm from pole axis | unchanged (matches the motor clamp) |
+| Lead-screw hole | 10.6 mm, 36 mm from pole axis | **41 mm** from pole axis (matches the motor clamp, whose motor sits beside its collar) |
+| TR8 nut flange pocket | 22.5 mm, near one end | moved with the hole and **centred** in the block, clear of the M5 bolts |
 
 Why only one half is threaded: if the screw threaded into both halves, it would lock into the first one and could never pull the halves together. Clearance on B + threads in A is what lets the screw clamp.
 
@@ -25,4 +26,4 @@ Why only one half is threaded: if the screw threaded into both halves, it would 
 ## Assembly
 1. Screw the TB6600 into the tray first (through the access holes in the holder), then screw the protoboard onto the holder upside down (M2 in the corners, M3 in the middle). Drive them in slowly the first time; they cut their own thread.
 2. Put both halves around the 19 mm section with the lead-screw half-holes lined up, and drive the four M5 screws in evenly. The first time, go slowly; the screw cuts its own thread.
-3. Rotate the nut clamp on the pole so its lead-screw hole sits directly above the motor clamp's motor shaft (36 mm from the pole's center at both clamps), and fit the TR8 nut.
+3. Rotate the nut clamp on the pole so its lead-screw hole sits directly above the motor clamp's motor shaft (41 mm from the pole's center at both clamps). The TR8 nut's flange sits in the pocket between the two halves.

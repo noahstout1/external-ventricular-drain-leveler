@@ -7,7 +7,11 @@ Changes to Clamp_A_ElectroCookie_6Hole_ScrewMount / Clamp_B_with_MotorDriver_Tra
   * The protoboard holder moves off part A and hangs, upside
     down, under part B's TB6600 tray. Screwdriver holes line up with the tray's
     four mounting holes.
-Lead-screw hole (10.6 mm, 36 mm from the pole axis) and bolt pattern unchanged.
+  * Lead-screw hole (10.6 mm) moves from 36 to 41 mm from the pole axis, to
+    match the motor clamp (whose motor sits beside its collar). The TR8 nut's
+    flange pocket moves with it and is centred in the block so it stays clear
+    of the M5 bolts.
+Bolt pattern unchanged.
 
 Usage:  python modify_nut_clamp.py      (needs: pip install manifold3d numpy)
 """
@@ -34,6 +38,12 @@ TRAY_FLOOR_BOTTOM = -31.0
 BOARD_TOP    = -18.9       # top of the protoboard holder's walls on the original part A
 TRAY_LOWEST  = -43.0       # lowest point of part B (gussets near the block)
 TRAY_HOLES   = [(-12.6, 35.8), (48.7, 35.8), (-12.6, 76.2), (48.7, 76.2)]
+LEAD_OLD_X   = 36.0
+LEAD_X       = 41.0        # must equal LEAD_OFFSET in ../motor_clamp/make_clamp.py
+LEAD_R       = 5.3         # TR8 brass nut barrel (10.2 mm) + clearance
+FLANGE_R     = 11.25       # TR8 nut flange pocket (22 mm flange)
+FLANGE_OLD_Z = (10.3, 14.5)
+FLANGE_Z     = (-2.1, 2.1)  # centred: clear of the bolts at z = +/-12.5
 ACCESS_R     = 4.0
 
 
@@ -82,6 +92,17 @@ def rebore(part, side):
     return (part + fill) - cyl_z(POLE_D / 2, -200, 200)
 
 
+def move_lead_hole(part, side):
+    """Fill the old lead-screw half-hole and flange pocket, cut them at LEAD_X."""
+    y0, y1 = (0.0, FLANGE_R + 1) if side > 0 else (-FLANGE_R - 1, 0.0)
+    half = box(0, 70, y0, y1, -BLOCK_HALF_Z, BLOCK_HALF_Z)
+    fill = (cyl_z(LEAD_R + 0.05, -BLOCK_HALF_Z, BLOCK_HALF_Z, LEAD_OLD_X)
+            + cyl_z(FLANGE_R + 0.05, FLANGE_OLD_Z[0] - 0.05, FLANGE_OLD_Z[1] + 0.05, LEAD_OLD_X)) ^ half
+    cut = (cyl_z(LEAD_R, -BLOCK_HALF_Z - 1, BLOCK_HALF_Z + 1, LEAD_X)
+           + cyl_z(FLANGE_R, FLANGE_Z[0], FLANGE_Z[1], LEAD_X))
+    return (part + fill) - cut
+
+
 # Assembly frame (= part B's file frame): pole axis = Z through the origin, split
 # face = plane y = 0, part B on +y, part A on -y, lead screw at (36, 0).
 B0 = load(SRC_B)
@@ -91,13 +112,13 @@ A0 = load(SRC_A).rotate([90, 0, 0])          # A's file has the pole along Y
 # holder only: floor + standoffs + walls (z -31..-19), not its gussets or the block face
 board = A0 ^ box(-100, 100, -200, -BLOCK_DEPTH - 0.05, TRAY_FLOOR_BOTTOM, BOARD_TOP)
 A = A0 ^ box(-100, 100, -BLOCK_DEPTH, 1, -BLOCK_HALF_Z, BLOCK_HALF_Z)
-A = rebore(A, -1)
+A = move_lead_hole(rebore(A, -1), -1)
 for x, z in BOLTS:
     A = A + cyl_y(OLD_HOLE_R + 0.05, -THREAD_DEPTH, 0.0, x, z)           # fill the 5.5 mm hole...
     A = A - cyl_y(PILOT_D / 2, -THREAD_DEPTH - 0.5, 0.5, x, z)           # ...and cut the pilot
 
 # ---------------- part B: tray + board holder underneath ----------------
-B = rebore(B0, +1)
+B = move_lead_hole(rebore(B0, +1), +1)
 # flip the holder upside down onto the +y side: (x, y, z) -> (x, -y, -z),
 # then drop it so its (now top) floor face meets part B's lowest point
 flipped = board.rotate([180, 0, 0])
