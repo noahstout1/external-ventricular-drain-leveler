@@ -223,10 +223,11 @@ void printHelp() {
   Serial.println("Debug:    p details | r raw data | h help");
 }
 
-// Example: Tragus sensor OK | Auto ON  | WATCHING   | EVD level (+0.3 cm)  | OK
+// Example: Tragus sensor OK 33.4C | Auto ON  | WATCHING   | EVD level (+0.3 cm)  | OK
 void printStatusLine(uint32_t now) {
   bool sensorGood = sensorOk && consecutiveReadErrors == 0;
-  Serial.printf("Tragus sensor %-4s | ", sensorGood ? "OK" : "FAIL");
+  if (sensorGood) Serial.printf("Tragus sensor OK %4.1fC | ", tempC);
+  else            Serial.print("Tragus sensor FAIL   --C | ");
   if (!poleOk(now)) {
     Serial.println(WiFi.status() == WL_CONNECTED ? "Connected to WiFi, waiting for pole node"
                                                  : "Searching for pole node WiFi...");

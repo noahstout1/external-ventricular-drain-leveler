@@ -140,7 +140,7 @@ static const float    GAIN              = 0.9f;   // <1 avoids overshoot from no
 static const float    MIN_MOVE_MM       = 0.5f;
 static const int      MAX_ITERATIONS    = 4;      // per correction cycle
 static const float    MAX_CYCLE_MOVE_MM = 200.0f;  // fault if one cycle needs more travel
-static const uint32_t CORRECTION_COOLDOWN_MS = 60000; // min gap between correction cycles
+static const uint32_t CORRECTION_COOLDOWN_MS = 30000; // min gap between correction cycles
 static const uint32_t TARE_WAIT_MAX_MS  = 600000; // waiting tare is forced after 10 min
 static const uint32_t LINK_TIMEOUT_MS   = 1500;   // tragus packets must arrive this often
 static const bool     AUTO_ON_BOOT      = false;  // safer: a person turns it on
@@ -832,13 +832,24 @@ const char* statusMessage(uint32_t now, char* buf, size_t n) {
   return "OK";
 }
 
-// Simple line (default):  Auto ON  | WATCHING   | EVD level (+0.3 cm)  | pole  +12.0 mm | OK
+// "Tragus 33.4C EVD 24.1C": each sensor's latest temperature, "--" if not reading.
+void tempText(char* buf, size_t n, uint32_t now) {
+  char t[8] = "  --", e[8] = "  --";
+  if (linkOk(now) && (tragus.flags & TF_SENSOR_OK)) snprintf(t, sizeof(t), "%4.1f", tragus.temperatureC);
+  if (evdHealthy() && lastEvdReadMs != 0) snprintf(e, sizeof(e), "%4.1f", tEvd);
+  snprintf(buf, n, "Tragus %sC EVD %sC", t, e);
+}
+
+// Simple line (default):
+//   Auto ON  | WATCHING   | EVD level (+0.3 cm)  | pole  +12.0 mm | Tragus 33.4C EVD 24.1C | OK
 // Verbose line ('v'): every flag and raw number, for debugging.
 void printStatusLine(uint32_t now) {
+  char temps[32];
+  tempText(temps, sizeof(temps), now);
   if (verbose) {
-    Serial.printf("%-10s auto:%s pos %+7.2f mm | err %+6.2f cm (+-%.2f) |",
+    Serial.printf("%-10s auto:%s pos %+7.2f mm | err %+6.2f cm (+-%.2f) | %s |",
                   stateText(state), autoEnabled ? "ON " : "OFF", posMm(),
-                  heightErrCm, noiseCm);
+                  heightErrCm, noiseCm, temps);
     printMeasFlags(measFlags);
     if (tarePending) Serial.print(" | TARE WAITING");
     if (cooldownActive && state == AS_IDLE)
@@ -849,8 +860,8 @@ void printStatusLine(uint32_t now) {
   }
   char err[32], msg[80];
   errorText(err, sizeof(err), heightErrCm, measFlags, TARGET_CM);
-  Serial.printf("Auto %-3s | %-10s | %-20s | pole %+6.1f mm | %s\n",
-                autoEnabled ? "ON" : "OFF", stateText(state), err, posMm(),
+  Serial.printf("Auto %-3s | %-10s | %-20s | pole %+6.1f mm | %s | %s\n",
+                autoEnabled ? "ON" : "OFF", stateText(state), err, posMm(), temps,
                 statusMessage(now, msg, sizeof(msg)));
 }
 

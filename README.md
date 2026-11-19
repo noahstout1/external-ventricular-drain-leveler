@@ -49,7 +49,7 @@ Optional limit switches and an e-stop: set `LIMIT_TOP_PIN`, `LIMIT_BOTTOM_PIN` a
 Clicks must be under 0.4 s apart; holds longer than 1.5 s are ignored. No automatic corrections start while a tare is waiting.
 
 ## Correction limits
-- After each correction cycle, the next one can't start for 60 s (`CORRECTION_COOLDOWN_MS`). Turning auto on resets this.
+- After each correction cycle, the next one can't start for 30 s (`CORRECTION_COOLDOWN_MS`). Turning auto on resets this.
 - One cycle may move the pole at most 200 mm (`MAX_CYCLE_MOVE_MM`); more raises a `CYCLE_LIMIT` fault.
 - `Temperature drifted` (`TEMP_DRIFT` in verbose mode) appears once either sensor is 0.5 °C away from its temperature at tare (`MAX_TEMP_DRIFT_FROM_TARE_C`). Auto stops correcting until you level by hand and tare again.
 
@@ -67,7 +67,7 @@ Clicks must be under 0.4 s apart; holds longer than 1.5 s are ignored. No automa
 Every 2 s the pole node prints one status line:
 
 ```
-Auto ON  | WATCHING   | EVD level (+0.3 cm)  | pole   +0.0 mm | OK
+Auto ON  | WATCHING   | EVD level (+0.3 cm)  | pole   +0.0 mm | Tragus 33.4C EVD 24.1C | OK
 ```
 
 | Column | Meaning |
@@ -76,9 +76,10 @@ Auto ON  | WATCHING   | EVD level (+0.3 cm)  | pole   +0.0 mm | OK
 | State | `OFF`, `WATCHING` (aligned, monitoring), `CONFIRMING` (misaligned, waiting 5 s), `MOVING`, `SETTLING` (checking the move), `FAULT` |
 | `EVD ...` | `level` within 0.5 cm, otherwise how far the EVD is `HIGH` or `LOW`; `--` before tare or without data |
 | `pole` | Pole position from power-up |
+| `Tragus ..C EVD ..C` | Each sensor's current temperature (`--` if that sensor isn't reading) |
 | Last column | The one thing to know or fix right now, in words |
 
-Lines starting with `**` are events (tare done, correction started, aligned, faults). The tragus node prints the same summary without the pole position. For debugging, `v` switches to the detailed line with every flag, `p` prints raw pressures/temperatures and settings, and `r` streams raw CSV data.
+Lines starting with `**` are events (tare done, correction started, aligned, faults). The tragus node prints the same summary with its own sensor's temperature, without the pole position. For debugging, `v` switches to the detailed line with every flag, `p` prints raw pressures/temperatures and settings, and `r` streams raw CSV data.
 
 ## Before any clinical use
 - Measure each sensor's temperature coefficient on the bench and set `TCO_TRAGUS_PA_PER_K` / `TCO_EVD_PA_PER_K`. Skin warming of the tragus sensor is the largest error source (~4 cm per 0.5 Pa of drift).
