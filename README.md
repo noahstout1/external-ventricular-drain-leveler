@@ -1,19 +1,21 @@
 # External Ventricular Drain Leveler
 
-Two ESP32s keep the EVD zero point level with the patient's tragus.
+Two ESP32s keep the EVD zero point level with the patient's tragus. A third ESP32 drives a status light.
 
 | Node | Folder | Hardware | Job |
 |---|---|---|---|
 | **Tragus** | `evd_tragus_node/` | ESP32 + BMP581 taped at the tragus | Streams raw pressure/temperature over WiFi |
-| **Pole** | `evd_pole_node/` | ESP32 + BMP581 at the EVD zero point + TB6600 + NEMA 17 TR8x2 lead screw | Hosts the WiFi network, computes the misalignment, moves the IV pole |
+| **Pole** | `evd_pole_node/` | ESP32 + BMP581 at the EVD zero point + TB6600 + NEMA 17 TR8x2 lead screw | Hosts the WiFi network, computes the misalignment, moves the IV pole, picks the light colour |
+| **Light** | `evd_light_node/` | ESP32 + 74AHCT125 + WS2812 (NeoPixel) strip, own 5 V supply | Joins the pole's WiFi and shows the colour the pole picks |
 
 Height error = (P_tragus − P_evd) / ~0.118 Pa per cm. Positive means the EVD zero is above the tragus, so the pole moves down.
 
 ## Libraries (Arduino Library Manager)
 - SparkFun BMP581 Arduino Library (works with the Adafruit BMP581)
 - AccelStepper (pole node only)
+- Adafruit NeoPixel (light node only)
 
-Board: **ESP32 Dev Module** (esp32 core 3.x). Open each folder as its own sketch. `evd_protocol.h` must be identical in both folders.
+Board: **ESP32 Dev Module** (esp32 core 3.x). Open each folder as its own sketch. `evd_protocol.h` must be identical in all three folders.
 
 ## Wiring
 **Both nodes, BMP581:** SDA→GPIO21, SCL→GPIO22, VIN→3V3, GND→GND. Default address 0x47 (0x46 also detected).
@@ -30,14 +32,29 @@ Board: **ESP32 Dev Module** (esp32 core 3.x). Open each folder as its own sketch
 | GPIO0 | Onboard BOOT button |
 | GPIO2 | Onboard LED |
 
+**Light node:** ESP32 GPIO18 → 74AHCT125 (1A → 1Y, 1OE to GND) → 330 Ω → strip DIN. One 5 V adapter feeds the strip, the ESP32's 5V/VIN pin and the 74AHCT125's VCC; all grounds common. 1000 µF across the strip's +5 V/GND at the strip end. No wires go to the other nodes: it gets everything over WiFi.
+
 Optional limit switches and an e-stop: set `LIMIT_TOP_PIN`, `LIMIT_BOTTOM_PIN` and `ESTOP_PIN` (normally-closed to GND). GPIO32, GPIO33 and GPIO13 are free for these.
 
 ## First-time setup
-1. Change `EVD_WIFI_SSID` / `EVD_WIFI_PASS` in `evd_protocol.h`, then copy the file into both folders.
-2. Flash both boards and open the pole node's Serial Monitor at 115200 baud with line ending set to Newline.
+1. Change `EVD_WIFI_SSID` / `EVD_WIFI_PASS` in `evd_protocol.h`, then copy the file into all three folders.
+2. Flash all three boards and open the pole node's Serial Monitor at 115200 baud with line ending set to Newline.
 3. With auto off, send `u 5`. If the pole goes **down**, set `DIR_INVERT = true`.
 4. Level the EVD to the tragus by hand. Click the button once (or send `t`). If temperatures aren't stable yet, the tare waits and happens by itself once they are. At power-up the pole node starts one of these waiting tares automatically (forced after 10 min if temperatures never settle).
 5. Double-click the button (or send `a`) to turn automatic correction on. Double-click again to turn it off.
+
+## Status light
+The pole node picks the colour and broadcasts it 4 times a second; the light node only displays it.
+
+| Light | Meaning | When |
+|---|---|---|
+| Solid green | Aligned | Error within `TRIGGER_CM` (1.5 cm) |
+| Solid red | Misaligned | Error above `TRIGGER_CM`, including while it confirms before moving, and when auto is off |
+| Solid yellow | Realigning | Pole moving, or checking the result of a move |
+| Blue pulse | Not measuring yet | Starting up, not tared yet, or a tare is waiting |
+| Flashing red | Check system | Fault, lost tragus link, sensor failure, temperature drifted since tare, implausible reading, **or the light hasn't heard from the pole for 2 s** |
+
+The light node's Serial Monitor (115200): `p` details, `c` cycle all colours, `n` LED chase test.
 
 ## Button
 | Action | Result | LED confirms |

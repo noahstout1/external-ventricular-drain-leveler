@@ -171,7 +171,6 @@ bool     haveTragus = false;
 uint32_t lastTragusMs = 0;
 uint32_t lastTragusSeq = 0;
 uint16_t tragusHzX10 = 0;
-IPAddress tragusIp;
 
 // ---- Moving-average ring buffer of pressure difference (tragus - evd), Pa ----
 static const int MAX_WINDOW = 128;
@@ -761,14 +760,38 @@ void receivePackets(uint32_t now) {
     lastTragusSeq = p.seq;
     haveTragus = true;
     lastTragusMs = now;
-    tragusIp = udp.remoteIP();
     onTragusSample(now, prevMs);
     stepper.run();
   }
 }
 
+// Colour for the status light (light node). Order = priority.
+//   flashing red : a person must look (fault, sensor/link lost, temp drift, implausible)
+//   yellow       : pole moving, or checking the result of a move
+//   blue pulse   : not measuring yet (no tare, tare waiting, tragus never connected)
+//   red / green  : |error| above / within TRIGGER_CM (also with auto OFF, to help
+//                  manual leveling). Green inside TRIGGER_CM matches when the
+//                  system itself would act.
+// While the averaging window refills (after any move) the previous colour is
+// kept, so the light doesn't blink blue between a move and its result.
+EvdLightColor lightColorNow(uint32_t now) {
+  static EvdLightColor last = LC_NOT_READY;
+  EvdLightColor c;
+  bool needsPerson = state == AS_FAULT ||
+                     (haveTragus && !linkOk(now)) ||
+                     (measFlags & (MF_SENSOR_FAULT | MF_TRAGUS_FAULT | MF_TEMP_DRIFT |
+                                   MF_IMPLAUSIBLE));
+  if (needsPerson)                                        c = LC_ATTENTION;
+  else if (isMoving() || state == AS_MOVING || state == AS_SETTLING) c = LC_YELLOW;
+  else if (!haveTragus || !calibrated || tarePending)     c = LC_NOT_READY;
+  else if (measFlags & MF_WARMING_UP)                     c = last;
+  else c = fabsf(heightErrCm) > TRIGGER_CM ? LC_RED : LC_GREEN;
+  last = c;
+  return c;
+}
+
+// Broadcast to everyone on the pole's WiFi (tragus node + light node).
 void sendStatus(uint32_t now) {
-  if (!haveTragus) return;
   EvdStatusPacket s = {};
   s.magic = EVD_MAGIC;
   s.version = EVD_PROTO_VERSION;
@@ -782,7 +805,8 @@ void sendStatus(uint32_t now) {
   s.noiseCm = noiseCm;
   s.positionMm = posMm();
   s.targetMm = targetMm();
-  udp.beginPacket(tragusIp, EVD_UDP_PORT_TRAGUS);
+  s.lightColor = lightColorNow(now);
+  udp.beginPacket(WiFi.softAPBroadcastIP(), EVD_UDP_PORT_STATUS);
   udp.write((const uint8_t*)&s, sizeof(s));
   udp.endPacket();
 }
@@ -1041,12 +1065,13 @@ void setup() {
 
   WiFi.mode(WIFI_AP);
   WiFi.setSleep(false);
-  // max 1 client: only the tragus node may join
-  if (!WiFi.softAP(EVD_WIFI_SSID, EVD_WIFI_PASS, EVD_WIFI_CHANNEL, 0, 1)) {
+  // Only the tragus node and the light node may join.
+  if (!WiFi.softAP(EVD_WIFI_SSID, EVD_WIFI_PASS, EVD_WIFI_CHANNEL, 0, EVD_MAX_CLIENTS)) {
     Serial.println("** WiFi could NOT start - restart the board");
   }
   udp.begin(EVD_UDP_PORT_POLE);
-  Serial.printf("WiFi network \"%s\" ready - waiting for tragus node\n", EVD_WIFI_SSID);
+  Serial.printf("WiFi network \"%s\" ready - waiting for tragus and light nodes\n",
+                EVD_WIFI_SSID);
 
   state = autoEnabled ? AS_IDLE : AS_AUTO_OFF;
   if (ESTOP_PIN >= 0 && estop()) enterFault(AF_ESTOP, "E-STOP active at boot");

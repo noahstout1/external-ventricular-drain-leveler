@@ -1,6 +1,6 @@
 // evd_protocol.h — shared message format for the EVD leveler.
-// This file must be IDENTICAL in evd_tragus_node/ and evd_pole_node/.
-// If you change anything here, copy it to both folders and bump EVD_PROTO_VERSION.
+// This file must be IDENTICAL in evd_tragus_node/, evd_pole_node/ and evd_light_node/.
+// If you change anything here, copy it to all three folders and bump EVD_PROTO_VERSION.
 #pragma once
 #include <stdint.h>
 
@@ -10,16 +10,22 @@
 //   POLE node   : ESP32 + BMP581 at the EVD zero point + TB6600/NEMA 17 lead
 //                 screw. Hosts the WiFi network, computes the misalignment,
 //                 and moves the IV pole.
+//   LIGHT node  : ESP32 + LED strip. Shows the colour the pole node picks.
+//                 Listens only; sends nothing.
 
 // ---------------- Network ----------------
 // The pole ESP32 creates its own private WiFi network (SoftAP); the tragus
-// ESP32 joins it. No hospital/campus WiFi is needed.
+// and light ESP32s join it. No hospital/campus WiFi is needed.
+// The pole BROADCASTS its status packet to EVD_UDP_PORT_STATUS, so every
+// node on the network receives it without the pole knowing their addresses.
 #define EVD_WIFI_SSID      "EVD-LEVELER-01"   // make unique per device pair
 #define EVD_WIFI_PASS      "change-me-1234"   // WPA2, must be >= 8 characters
 #define EVD_WIFI_CHANNEL   6
 #define EVD_POLE_IP_OCTETS 192, 168, 4, 1     // SoftAP default address
 #define EVD_UDP_PORT_POLE   4210              // pole node listens here
-#define EVD_UDP_PORT_TRAGUS 4211              // tragus node listens here (status)
+#define EVD_UDP_PORT_TRAGUS 4211              // tragus and light nodes listen here (status)
+#define EVD_UDP_PORT_STATUS EVD_UDP_PORT_TRAGUS
+#define EVD_MAX_CLIENTS    2                  // tragus + light
 
 #define EVD_MAGIC          0x21445645UL       // "EVD!" little-endian
 #define EVD_PROTO_VERSION  2
@@ -78,6 +84,16 @@ enum EvdActuatorFault : uint16_t {
   AF_CYCLE_LIMIT   = 1 << 6,  // single correction cycle tried to move too far
 };
 
+// Colour the status light should show. Chosen by the pole node so every
+// threshold lives in one place (see lightColorNow() in evd_pole_node.ino).
+enum EvdLightColor : uint8_t {
+  LC_NOT_READY = 0,  // slow blue pulse : not measuring yet (no tare, tare waiting, starting up)
+  LC_GREEN     = 1,  // solid green     : aligned (within TRIGGER_CM)
+  LC_RED       = 2,  // solid red       : misaligned
+  LC_YELLOW    = 3,  // solid yellow    : pole is moving / checking the result of a move
+  LC_ATTENTION = 4,  // flashing red    : fault or lost sensor/link - a person must look
+};
+
 struct __attribute__((packed)) EvdStatusPacket {
   uint32_t magic;
   uint8_t  version;
@@ -87,7 +103,7 @@ struct __attribute__((packed)) EvdStatusPacket {
   uint32_t lastTragusSeq;  // last tragus packet the pole node accepted
   uint16_t measFlags;      // EvdMeasFlags
   uint8_t  autoOn;
-  uint8_t  reserved;
+  uint8_t  lightColor;     // EvdLightColor (was an unused, always-0 byte; 0 = NOT_READY)
   float    heightErrorCm;  // filtered, see sign convention above
   float    noiseCm;        // 1-sigma uncertainty of the averaged error
   float    positionMm;     // + = up, relative to power-on (or 'z' command)
