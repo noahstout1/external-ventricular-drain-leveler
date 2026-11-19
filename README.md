@@ -39,8 +39,8 @@ Optional limit switches and an e-stop: set `LIMIT_TOP_PIN`, `LIMIT_BOTTOM_PIN` a
 ## First-time setup
 1. Change `EVD_WIFI_SSID` / `EVD_WIFI_PASS` in `evd_protocol.h`, then copy the file into all three folders.
 2. Flash all three boards and open the pole node's Serial Monitor at 115200 baud with line ending set to Newline.
-3. With auto off, send `u 5`. If the pole goes **down**, set `DIR_INVERT = true`.
-4. Level the EVD to the tragus by hand. Click the button once (or send `t`). If temperatures aren't stable yet, the tare waits and happens by itself once they are. At power-up the pole node starts one of these waiting tares automatically (forced after 10 min if temperatures never settle).
+3. With auto off, send `u 5`. If the pole goes **down**, flip `DIR_INVERT`.
+4. Level the EVD to the tragus by hand. Click the button once (or send `t`). If the readings aren't steady yet, the tare waits and happens by itself once they are (see *When the tare happens* below). At power-up the pole node starts one of these waiting tares automatically (forced after 5 min if the readings never settle).
 5. Double-click the button (or send `a`) to turn automatic correction on. Double-click again to turn it off.
 
 ## Status light
@@ -59,11 +59,19 @@ The light node's Serial Monitor (115200): `p` details, `c` cycle all colours, `n
 ## Button
 | Action | Result | LED confirms |
 |---|---|---|
-| 1 click | Tare (zero) both pressure sensors. If temperatures aren't stable, it waits and tares by itself once they are. | 1 flash = tared. Short blip every second = waiting. Rapid flicker = refused (e.g. pole moving or no tragus link). |
+| 1 click | Tare (zero) both pressure sensors. If the readings aren't steady, it waits and tares by itself once they are. | 1 flash = tared. Short blip every second = waiting. Rapid flicker = refused (e.g. pole moving or no tragus link). |
 | 1 click while waiting | Tare right now, skipping the temperature wait | 1 flash |
 | 2 clicks | Toggle automatic correction | 2 flashes = auto ON, 3 flashes = auto OFF |
 
 Clicks must be under 0.4 s apart; holds longer than 1.5 s are ignored. No automatic corrections start while a tare is waiting.
+
+## When the tare happens
+A waiting tare (power-up, or a click when things aren't ready) checks once a second and tares as soon as all of these hold:
+- **The zero has stopped drifting:** the trend of the pressure difference over the last 60 s is under 0.3 cm/min. This is the main test, because it measures the thing being zeroed directly.
+- **Neither sensor is still warming or cooling fast:** both temperature trends are under 0.3 °C/min. This is a backstop, for example for a tragus sensor just taped onto skin.
+- The 3 s average isn't noisy, the tragus link is up, both sensors are healthy, and the pole isn't moving.
+
+Any pole move (automatic or jog) restarts the 60 s zero trend, because the zero jumps with the move. After 5 min a power-up tare is forced anyway. Click again (or `T`) to force a tare yourself. These thresholds are starting guesses: tune them with `set` once the hardware is running.
 
 ## Correction limits
 - After each correction cycle, the next one can't start for 30 s (`CORRECTION_COOLDOWN_MS`). Turning auto on resets this.
@@ -75,10 +83,27 @@ Clicks must be under 0.4 s apart; holds longer than 1.5 s are ignored. No automa
 - **Tragus sensor:** put a thin foam pad (2–3 mm) between the sensor and the skin, and let it sit on the patient for 5–10 min before tare.
 - **Keep heat away:** mount each sensor 10+ cm from the ESP32, TB6600 and motor, out of direct sunlight and vents.
 - **Power up early:** turn both nodes on several minutes before leveling so the boards reach a steady temperature.
-- Tare only once `T_STABLE` shows (the button's waiting tare does this for you).
+- Tare only once `STEADY` shows in verbose mode (the button's waiting tare does this for you).
 
 ## Pole node commands
-`t` tare · `T` force tare · `a` auto on/off · `u <mm>` / `d <mm>` jog · `s` stop · `c` clear faults · `z` zero position · `r` raw CSV · `p` details · `v` verbose status · `h` help
+`set` list tunable settings · `set <name> <value>` change one until reset (e.g. `set cooldown 10`) · `t` tare · `T` force tare · `a` auto on/off · `u <mm>` / `d <mm>` jog · `s` stop · `c` clear faults · `z` zero position · `r` raw CSV · `p` details · `v` verbose status · `h` help
+
+## Tuning on the bench
+Times are in seconds. Changes made with `set` are lost on reset, so copy the values you settle on into the sketch.
+
+| Setting | Default | What it does |
+|---|---|---|
+| `stable_win` | 60 | How long the trends are measured over. This is the shortest possible wait before an automatic tare. |
+| `stable_dp` | 0.3 | Drift of the zero (cm/min) that counts as steady |
+| `stable_rate` | 0.3 | Temperature trend (°C/min, both sensors) allowed at tare (backstop) |
+| `tare_max` | 300 | A waiting tare is forced after this long |
+| `drift` | 0.5 | Temperature change (°C) since the tare that blocks auto |
+| `trigger` / `target` | 1.5 / 0.5 | Error (cm) that starts a correction / counts as aligned |
+| `persist` | 5 | How long a misalignment must last before the pole moves |
+| `cooldown` | 30 | Wait after a correction cycle before the next one can start |
+| `soft_up` / `soft_down` / `cycle_max` | 200 | Travel limits in mm. On a bench lead screw, set these to its real travel. |
+
+Events print how long things took: `TARE DONE after waiting N s` (with the zero and temperature trends at that moment) and `ALIGNED ... N s after misalignment was first seen`.
 
 ## Reading the Serial Monitor
 Every 2 s the pole node prints one status line:

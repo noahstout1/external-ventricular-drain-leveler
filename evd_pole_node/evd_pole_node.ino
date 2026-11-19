@@ -23,7 +23,7 @@
 //   5. Wait CORRECTION_COOLDOWN_MS before another cycle may start.
 //   Motion stops immediately on: lost tragus link, sensor fault, limit switch,
 //   e-stop, or a correction that would exceed travel limits.
-//   No new cycle starts while a tare is waiting for stable temperatures.
+//   No new cycle starts while a tare is waiting for steady readings.
 //
 // Libraries (Arduino Library Manager):
 //   * "SparkFun BMP581 Arduino Library"
@@ -32,7 +32,7 @@
 //
 // Serial commands (115200 baud, end with newline):
 //   t        tare / zero: EVD has just been manually leveled to the tragus
-//   T        force tare even if temperatures are not yet stable
+//   T        force tare even if readings are not yet steady
 //   a        toggle automatic correction on/off
 //   u <mm>   jog pole up   (auto must be off), e.g. "u 5"
 //   d <mm>   jog pole down (auto must be off)
@@ -43,12 +43,13 @@
 //   p        print detailed status
 //   h        help
 // Push button (GPIO4 to GND; the onboard BOOT button does the same):
-//   1 click  = tare. If temperatures are not stable yet, the tare WAITS and
+//   1 click  = tare. If readings are not steady yet, the tare WAITS and
 //              happens by itself once they are (LED: short blip every second).
 //              Click again while waiting = tare right now anyway.
 //   2 clicks = toggle auto on/off
 // LED confirms: 1 flash = tared, 2 = auto ON, 3 = auto OFF, rapid flicker = refused.
-// At power-up a waiting tare is started automatically (forced after 10 min).
+// At power-up a waiting tare is started automatically (forced after TARE_WAIT_MAX_MS).
+// Tuning: "set" lists live-adjustable settings; "set cooldown 10" changes one.
 // =============================================================================
 #include <Arduino.h>
 #include <Wire.h>
@@ -97,16 +98,20 @@ static const bool  DIR_INVERT = true;   // flip if "u" moves the pole DOWN (set:
 static const float MAX_SPEED_MM_S = 3.0f;
 static const float ACCEL_MM_S2    = 3.0f;
 
+// Settings below that are NOT "static const" can also be changed while running
+// with "set <name> <value>" (see SETTINGS[] further down). Those changes last
+// until reset; copy the values you settle on back into this file.
+
 // --- Travel limits (relative to power-on position or last 'z') ---
-static const float SOFT_LIMIT_UP_MM   = 200.0f;
-static const float SOFT_LIMIT_DOWN_MM = 200.0f;
+float SOFT_LIMIT_UP_MM   = 200.0f;
+float SOFT_LIMIT_DOWN_MM = 200.0f;
 
 // --- Filtering ---
-static const float AVG_WINDOW_S = 3.0f;      // moving-average length
+float AVG_WINDOW_S = 3.0f;      // moving-average length
 // The reading is flagged NOISY when the 1-sigma uncertainty of the window
 // AVERAGE exceeds this. (Single samples are much noisier than the average;
 // judging them would flag a healthy system.) Keep it at or below TARGET_CM.
-static const float MAX_NOISE_CM = 0.5f;
+float MAX_NOISE_CM = 0.5f;
 // A real misalignment bigger than this almost certainly means a sensor fell
 // off, the patient sat up, or the pole was bumped — a person should look.
 static const float MAX_PLAUSIBLE_CM = 30.0f;
@@ -121,27 +126,40 @@ static const float TCO_EVD_PA_PER_K    = 0.0f;
 // is marked invalid (re-tare needed). Tighten/loosen after bench testing.
 // With TCO = 0, 0.5 C of drift is ~2 cm of false error. Loosen only after the
 // TCO_* values above have been measured.
-static const float MAX_TEMP_DRIFT_FROM_TARE_C = 0.5f;
-// Temperature counts as "stable" when it changes less than this per minute.
-static const float TEMP_STABLE_C_PER_MIN = 0.10f;
+float MAX_TEMP_DRIFT_FROM_TARE_C = 0.5f;
+
+// --- When is it safe to tare? ---
+// A waiting tare happens once the readings are steady. "Steady" is judged from
+// least-squares trends over the last STABLE_WINDOW_S seconds:
+//  * MAIN TEST: the pressure difference itself (the thing being zeroed) is
+//    drifting less than STABLE_DP_CM_PER_MIN. Temperature only matters
+//    because it moves this, so this is checked directly.
+//  * BACKSTOP: neither sensor's temperature is changing faster than
+//    TEMP_STABLE_C_PER_MIN (catches a tragus sensor still warming on skin).
+// STABLE_WINDOW_S is also the shortest possible wait before a tare, and the
+// dP trend restarts after every pole move.
+// These are starting guesses, not measured values: tune with "set".
+float STABLE_DP_CM_PER_MIN  = 0.3f;
+float TEMP_STABLE_C_PER_MIN = 0.3f;   // was 0.1 when temperature was the only test
+float STABLE_WINDOW_S       = 60.0f;  // longer = less upset by drafts
 
 // --- Physics ---
 static const double R_DRY_AIR = 287.05;      // J/(kg*K)
 static const double G0        = 9.80665;     // m/s^2
 
 // --- Control (agree these numbers with your clinical client) ---
-static const float    TRIGGER_CM        = 1.5f;   // start correcting above this
-static const float    TARGET_CM         = 0.5f;   // stop correcting inside this
-static const uint32_t PERSIST_MS        = 5000;   // misalignment must last this long
+float    TRIGGER_CM        = 1.5f;   // start correcting above this
+float    TARGET_CM         = 0.5f;   // stop correcting inside this
+uint32_t PERSIST_MS        = 5000;   // misalignment must last this long
 static const uint32_t PERSIST_DROPOUT_MS = 3000;  // brief unusable data tolerated while confirming
-static const uint32_t MECH_SETTLE_MS    = 2000;   // ignore samples after a move (sway + IIR lag)
+uint32_t MECH_SETTLE_MS    = 2000;   // ignore samples after a move (sway + IIR lag)
 static const uint32_t SETTLE_TIMEOUT_MS = 30000;  // give up waiting for fresh data
-static const float    GAIN              = 0.9f;   // <1 avoids overshoot from noise
+float    GAIN              = 0.9f;   // <1 avoids overshoot from noise
 static const float    MIN_MOVE_MM       = 0.5f;
 static const int      MAX_ITERATIONS    = 4;      // per correction cycle
-static const float    MAX_CYCLE_MOVE_MM = 200.0f;  // fault if one cycle needs more travel
-static const uint32_t CORRECTION_COOLDOWN_MS = 30000; // min gap between correction cycles
-static const uint32_t TARE_WAIT_MAX_MS  = 600000; // waiting tare is forced after 10 min
+float    MAX_CYCLE_MOVE_MM = 200.0f;  // fault if one cycle needs more travel
+uint32_t CORRECTION_COOLDOWN_MS = 30000; // min gap between correction cycles (was 60 s)
+uint32_t TARE_WAIT_MAX_MS  = 300000; // waiting tare is forced after 5 min (was 10)
 static const uint32_t LINK_TIMEOUT_MS   = 1500;   // tragus packets must arrive this often
 static const bool     AUTO_ON_BOOT      = false;  // safer: a person turns it on
 
@@ -179,16 +197,28 @@ int      windowLen = 15;
 int      bufCount = 0, bufHead = 0;
 uint32_t holdSamplesUntilMs = 0;   // after motion, ignore samples until then
 
-// ---- Temperature history for stability check: one point every 5 s, 60 s span ----
-static const int TEMP_HIST = 13;
-float tempHistT[TEMP_HIST], tempHistE[TEMP_HIST];
+// ---- History for the "steady enough to tare" check: one point every 2 s, up to 120 s ----
+// Each point holds both temperatures and the average dP of the samples since
+// the previous point (averaging keeps sensor noise out of the dP trend).
+static const uint32_t TEMP_SAMPLE_MS = 2000;
+static const int TEMP_HIST = 61;
+float    tempHistT[TEMP_HIST], tempHistE[TEMP_HIST];
+double   tempHistDp[TEMP_HIST];
+uint32_t tempHistMs[TEMP_HIST];
 int   tempHistCount = 0, tempHistHead = 0;
 uint32_t lastTempHistMs = 0;
+double   dpBinSum = 0;                 // dP samples since the last history point
+int      dpBinN = 0;
 float slopeTragus = 0, slopeEvd = 0;   // degC per minute
+float slopeDpCm = 0;                   // cm per minute
+bool  tempSpanFull = false;            // temp history covers STABLE_WINDOW_S
+bool  dpSpanFull = false;              // dP history (since last move) covers it
+uint32_t tempSpanMs = 0, dpSpanMs = 0; // how much history the trends are based on
+uint32_t dpValidSinceMs = 0;           // dP points before this (pre-move) are ignored
 
 // ---- Calibration (tare) ----
 bool   calibrated = false;
-bool     tarePending = false;        // waiting for stable temperatures to tare
+bool     tarePending = false;        // waiting for steady readings to tare
 bool     tarePendingByUser = false;  // false = the power-up tare
 uint32_t tarePendingSinceMs = 0, lastTareTryMs = 0;
 double tareOffsetPa = 0;
@@ -403,32 +433,86 @@ double paPerCm() {
   return rho * G0 / 100.0;                            // ~0.118 Pa/cm
 }
 
-void updateTempHistory(uint32_t now) {
-  if (tempHistCount > 0 && now - lastTempHistMs < 5000) return;
-  lastTempHistMs = now;
-  tempHistT[tempHistHead] = tragus.temperatureC;
-  tempHistE[tempHistHead] = tEvd;
-  tempHistHead = (tempHistHead + 1) % TEMP_HIST;
-  if (tempHistCount < TEMP_HIST) tempHistCount++;
-  if (tempHistCount == TEMP_HIST) {
-    int oldest = tempHistHead;                         // ring is full
-    int newest = (tempHistHead + TEMP_HIST - 1) % TEMP_HIST;
-    float minutes = (TEMP_HIST - 1) * 5.0f / 60.0f;
-    slopeTragus = (tempHistT[newest] - tempHistT[oldest]) / minutes;
-    slopeEvd    = (tempHistE[newest] - tempHistE[oldest]) / minutes;
+// Least-squares line fit, used for the temperature and dP trends.
+struct LineFit {
+  double n = 0, sx = 0, sxx = 0, sy = 0, sxy = 0;
+  void add(double x, double y) { n++; sx += x; sxx += x * x; sy += y; sxy += x * y; }
+  bool ok() const { return n >= 3 && n * sxx - sx * sx > 0; }
+  double slope() const { return (n * sxy - sx * sy) / (n * sxx - sx * sx); }
+};
+
+// Trends over the last STABLE_WINDOW_S seconds. Uses real timestamps, so gaps
+// (link drops, motion holds) are handled.
+void computeStabilitySlopes(uint32_t now) {
+  uint32_t windowMs = (uint32_t)(STABLE_WINDOW_S * 1000.0f);
+  LineFit tT, tE, dP;
+  uint32_t oldestAge = 0, oldestDpAge = 0;
+  for (int i = 0; i < tempHistCount; i++) {
+    int idx = (tempHistHead - 1 - i + TEMP_HIST) % TEMP_HIST;   // newest first
+    uint32_t age = now - tempHistMs[idx];
+    if (age > windowMs) break;
+    double x = -(double)age / 60000.0;                          // minutes
+    tT.add(x, tempHistT[idx]);
+    tE.add(x, tempHistE[idx]);
+    oldestAge = age;
+    if ((int32_t)(tempHistMs[idx] - dpValidSinceMs) >= 0) {     // after the last move
+      dP.add(x, tempHistDp[idx]);
+      oldestDpAge = age;
+    }
+  }
+  tempSpanMs = oldestAge;
+  dpSpanMs = oldestDpAge;
+  if (tT.ok()) {
+    slopeTragus = (float)tT.slope();
+    slopeEvd    = (float)tE.slope();
+    tempSpanFull = oldestAge + TEMP_SAMPLE_MS > windowMs;
+  } else {
+    tempSpanFull = false;
+  }
+  if (dP.ok()) {
+    slopeDpCm  = (float)(dP.slope() / paPerCm());
+    dpSpanFull = oldestDpAge + TEMP_SAMPLE_MS > windowMs;
+  } else {
+    dpSpanFull = false;
   }
 }
 
+// Called with every accepted dP sample; stores one history point every 2 s.
+void updateStabilityHistory(uint32_t now, double dp) {
+  dpBinSum += dp;
+  dpBinN++;
+  if (tempHistCount > 0 && now - lastTempHistMs < TEMP_SAMPLE_MS) return;
+  lastTempHistMs = now;
+  tempHistT[tempHistHead] = tragus.temperatureC;
+  tempHistE[tempHistHead] = tEvd;
+  tempHistDp[tempHistHead] = dpBinSum / dpBinN;
+  tempHistMs[tempHistHead] = now;
+  tempHistHead = (tempHistHead + 1) % TEMP_HIST;
+  if (tempHistCount < TEMP_HIST) tempHistCount++;
+  dpBinSum = 0;
+  dpBinN = 0;
+  computeStabilitySlopes(now);
+}
+
+// Backstop: neither sensor is still warming or cooling quickly.
 bool tempsStable() {
-  return tempHistCount == TEMP_HIST &&
+  return tempSpanFull &&
          fabsf(slopeTragus) < TEMP_STABLE_C_PER_MIN &&
          fabsf(slopeEvd) < TEMP_STABLE_C_PER_MIN;
 }
 
+// Main test: the zero (dP) has stopped drifting since the last move.
+bool dpSteady() {
+  return dpSpanFull && fabsf(slopeDpCm) < STABLE_DP_CM_PER_MIN;
+}
+
+// Steady enough to tare without forcing (also shown as the STEADY flag).
+bool readyToTare() { return dpSteady() && tempsStable(); }
+
 void computeOutput(uint32_t now) {
   measFlags = 0;
   if (calibrated)    measFlags |= MF_CALIBRATED;
-  if (tempsStable()) measFlags |= MF_TEMP_STABLE;
+  if (readyToTare()) measFlags |= MF_TEMP_STABLE;   // flag now means "steady enough to tare"
   if (!evdHealthy()) measFlags |= MF_SENSOR_FAULT;
   if (!linkOk(now))  measFlags |= MF_TRAGUS_LINK;
   else if (!(tragus.flags & TF_SENSOR_OK)) measFlags |= MF_TRAGUS_FAULT;
@@ -475,7 +559,7 @@ void onTragusSample(uint32_t now, uint32_t prevTragusMs) {
 
   double dp = (double)tragus.pressurePa - (double)pEvd;
   pushSample(dp);
-  updateTempHistory(now);
+  updateStabilityHistory(now, dp);
   computeOutput(now);
 
   if (rawLogging) {
@@ -487,13 +571,15 @@ void onTragusSample(uint32_t now, uint32_t prevTragusMs) {
 
 // ------------------------------ Calibration ----------------------------------
 // Why a tare cannot happen right now, or nullptr if it can. force skips the
-// temperature-stability and noise checks (never the moving/link checks).
+// steadiness and noise checks (never the moving/link checks).
 const char* tareBlocker(bool force) {
   if (isMoving()) return "pole is moving";
   if (!evdHealthy() || !linkOk(millis()) || bufCount < windowLen)
     return "sensors/link not ready or window not full yet";
   if (force) return nullptr;
-  if (!tempsStable()) return "temperatures still changing";
+  if (!dpSpanFull || !tempSpanFull) return "collecting readings to check they are steady";
+  if (!dpSteady())   return "zero still drifting";
+  if (!tempsStable()) return "a sensor is still warming up or cooling down";
   double meanDp, sdDp;
   windowStats(meanDp, sdDp);
   if (sdDp / paPerCm() > MAX_NOISE_CM) return "readings too noisy (draft? bumped?)";
@@ -504,19 +590,24 @@ bool doTare(bool force) {
   const char* why = tareBlocker(force);
   if (why) {
     Serial.printf("** Tare not possible: %s\n", why);
-    if (verbose) Serial.printf("   temp slopes tragus %.2f, evd %.2f C/min (need < %.2f)\n",
+    if (verbose) Serial.printf("   trends: dP %+.2f cm/min (need < %.2f), temps %+.2f / %+.2f "
+                               "C/min (need < %.2f)\n", slopeDpCm, STABLE_DP_CM_PER_MIN,
                                slopeTragus, slopeEvd, TEMP_STABLE_C_PER_MIN);
     return false;
   }
   double meanDp, sdDp;
   windowStats(meanDp, sdDp);
+  uint32_t waitedS = tarePending ? (millis() - tarePendingSinceMs) / 1000 : 0;
   tarePending    = false;
   tareOffsetPa   = meanDp;
   tareTempTragus = tragus.temperatureC;
   tareTempEvd    = tEvd;
   calibrated     = true;
   computeOutput(millis());
-  Serial.println("** TARE DONE - current height is now 'level'");
+  Serial.printf("** TARE DONE after waiting %lu s - current height is now 'level'\n",
+                (unsigned long)waitedS);
+  Serial.printf("   trends at tare: dP %+.2f cm/min, temps tragus %+.3f / evd %+.3f C/min\n",
+                slopeDpCm, slopeTragus, slopeEvd);
   if (verbose) Serial.printf("   offset %.2f Pa, Ttragus %.2f C, Tevd %.2f C\n",
                              tareOffsetPa, tareTempTragus, tareTempEvd);
   return true;
@@ -527,20 +618,20 @@ void startPendingTare(uint32_t now, bool byUser) {
   tarePendingByUser = byUser;
   tarePendingSinceMs = now;
   lastTareTryMs = now;
-  Serial.println(byUser
-      ? "** Tare will happen once temperatures settle (click again to tare now)"
-      : "** Will tare automatically once temperatures settle (forced after 10 min)");
+  if (byUser) Serial.println("** Tare will happen once readings are steady (click again to tare now)");
+  else Serial.printf("** Will tare automatically once readings are steady (forced after %lu s)\n",
+                     (unsigned long)(TARE_WAIT_MAX_MS / 1000));
 }
 
 // A person asked to tare (button click or 't'). Returns 1 = tared, 0 = refused,
-// -1 = now waiting for stable temperatures.
+// -1 = now waiting for steady readings.
 int requestTare(uint32_t now, bool forceIfWaiting) {
   if (tarePending && tarePendingByUser && forceIfWaiting) {
     Serial.println("** Tare forced without waiting");
     return doTare(true) ? 1 : 0;
   }
   if (tarePending && tarePendingByUser) {
-    Serial.println("** Tare already waiting for temperatures ('T' forces it)");
+    Serial.println("** Tare already waiting for steady readings ('T' forces it)");
     return -1;
   }
   if (tareBlocker(false) == nullptr) return doTare(false) ? 1 : 0;
@@ -554,7 +645,8 @@ void serviceTare(uint32_t now) {
   lastTareTryMs = now;
   bool timeUp = now - tarePendingSinceMs >= TARE_WAIT_MAX_MS;
   if (tareBlocker(timeUp) != nullptr) return;          // keep waiting quietly
-  if (timeUp) Serial.println("** Temperatures didn't settle in 10 min - taring anyway");
+  if (timeUp) Serial.printf("** Readings didn't settle in %lu s - taring anyway\n",
+                            (unsigned long)(TARE_WAIT_MAX_MS / 1000));
   if (doTare(timeUp)) ledAck(1, now);
 }
 
@@ -632,6 +724,10 @@ void trackMotion(uint32_t now) {
   if (wasMoving && !moving) {
     resetWindow();
     holdSamplesUntilMs = now + MECH_SETTLE_MS;
+    // The zero jumped with the move: judge steadiness only from new readings.
+    dpValidSinceMs = holdSamplesUntilMs;
+    dpBinSum = 0; dpBinN = 0;
+    computeStabilitySlopes(now);
     computeOutput(now);     // drop the pre-move VALID flag right away
     if (!HOLD_WHEN_IDLE) driverEnable(false);
   }
@@ -731,7 +827,8 @@ void controlStep(uint32_t now) {
         break;
       }
       if (fabsf(err) <= TARGET_CM) {
-        Serial.printf("** ALIGNED (%+.1f cm) after %d move(s)\n", err, iteration);
+        Serial.printf("** ALIGNED (%+.1f cm) after %d move(s), %.1f s after misalignment was "
+                      "first seen\n", err, iteration, (now - persistStartMs) / 1000.0f);
         state = AS_IDLE;
         cooldownActive = true; lastCycleEndMs = now;
       } else if (iteration >= MAX_ITERATIONS) {
@@ -818,12 +915,13 @@ void printHelp() {
                  "| c clear fault");
   Serial.println("Debug:    p details | v verbose status | r raw data | T force tare "
                  "| z zero position | h help");
+  Serial.println("Tuning:   set (list settings) | set <name> <value>, e.g. set cooldown 10");
 }
 
 void printMeasFlags(uint16_t f) {
   if (f & MF_VALID)        Serial.print(" VALID");
   if (f & MF_CALIBRATED)   Serial.print(" CAL");
-  if (f & MF_TEMP_STABLE)  Serial.print(" T_STABLE");
+  if (f & MF_TEMP_STABLE)  Serial.print(" STEADY");
   if (f & MF_SENSOR_FAULT) Serial.print(" EVD_SENSOR_FAULT");
   if (f & MF_TRAGUS_FAULT) Serial.print(" TRAGUS_SENSOR_FAULT");
   if (f & MF_TRAGUS_LINK)  Serial.print(" NO_TRAGUS_LINK");
@@ -841,7 +939,7 @@ uint32_t cooldownLeftS(uint32_t now) {
 // The one thing a person most needs to know right now.
 const char* statusMessage(uint32_t now, char* buf, size_t n) {
   if (state == AS_FAULT) { snprintf(buf, n, "FAULT: %s (send 'c' after fixing)", faultReason); return buf; }
-  if (tarePending) return "Waiting for temperatures to settle, then tares (click = tare now)";
+  if (tarePending) return "Waiting for steady readings, then tares (click = tare now)";
   const char* issue = issueText(measFlags, 0);
   if (issue) return issue;
   switch (state) {
@@ -893,8 +991,12 @@ void printDetail() {
   Serial.println("---- POLE NODE STATUS ----");
   Serial.printf("P tragus %.2f Pa  P evd %.2f Pa  raw dP %.2f Pa\n", tragus.pressurePa,
                 pEvd, tragus.pressurePa - pEvd);
-  Serial.printf("T tragus %.2f C  T evd %.2f C  slopes %.3f / %.3f C/min (hist %d/%d)\n",
-                tragus.temperatureC, tEvd, slopeTragus, slopeEvd, tempHistCount, TEMP_HIST);
+  Serial.printf("T tragus %.2f C  T evd %.2f C  slopes %.3f / %.3f C/min (history %d/%d s)\n",
+                tragus.temperatureC, tEvd, slopeTragus, slopeEvd,
+                (int)(tempSpanMs / 1000), (int)STABLE_WINDOW_S);
+  Serial.printf("dP trend %+.2f cm/min (history %d/%d s since last move)  ready to tare: %s\n",
+                slopeDpCm, (int)(dpSpanMs / 1000), (int)STABLE_WINDOW_S,
+                readyToTare() ? "yes" : "no");
   Serial.printf("Pa per cm %.4f  window %d/%d  EVD ODR %.0f Hz  tragus %.1f Hz\n",
                 paPerCm(), bufCount, windowLen, evdOdrHz, tragusHzX10 / 10.0f);
   Serial.printf("Calibrated %s  offset %.2f Pa  tare temps %.2f / %.2f C\n",
@@ -912,9 +1014,73 @@ void printDetail() {
   Serial.println("--------------------------");
 }
 
+// ---------------- Live-tunable settings ("set <name> <value>") ---------------
+// Lasts until reset. Times are entered in seconds.
+struct Setting {
+  const char* name;
+  float*      f;       // float setting, or
+  uint32_t*   ms;      // time setting stored in ms, entered in seconds
+  float       lo, hi;
+  const char* help;
+};
+const Setting SETTINGS[] = {
+  {"trigger",     &TRIGGER_CM,                 nullptr,                 0.2f, 20,   "cm   error that starts a correction"},
+  {"target",      &TARGET_CM,                  nullptr,                 0.1f, 10,   "cm   error that counts as aligned"},
+  {"persist",     nullptr,                     &PERSIST_MS,             0,    120,  "s    misalignment must last this long"},
+  {"cooldown",    nullptr,                     &CORRECTION_COOLDOWN_MS, 0,    3600, "s    wait after a correction cycle"},
+  {"settle",      nullptr,                     &MECH_SETTLE_MS,         0,    30,   "s    ignore readings after a move"},
+  {"gain",        &GAIN,                       nullptr,                 0.1f, 1.5f, "     fraction of error corrected per move"},
+  {"avg",         &AVG_WINDOW_S,               nullptr,                 0.5f, 12,   "s    averaging window"},
+  {"noise",       &MAX_NOISE_CM,               nullptr,                 0.05f,10,   "cm   max noise of the average"},
+  {"stable_dp",   &STABLE_DP_CM_PER_MIN,       nullptr,                 0.01f,10,   "cm/min zero drift that counts as steady (tare)"},
+  {"stable_rate", &TEMP_STABLE_C_PER_MIN,      nullptr,                 0.01f,5,    "C/min temp trend allowed at tare (backstop)"},
+  {"stable_win",  &STABLE_WINDOW_S,            nullptr,                 6,    120,  "s    how long the trends are measured over"},
+  {"tare_max",    nullptr,                     &TARE_WAIT_MAX_MS,       0,    3600, "s    waiting tare is forced after this"},
+  {"drift",       &MAX_TEMP_DRIFT_FROM_TARE_C, nullptr,                 0.05f,10,   "C    temp change since tare that blocks auto"},
+  {"soft_up",     &SOFT_LIMIT_UP_MM,           nullptr,                 0,    1000, "mm   max travel up from 0"},
+  {"soft_down",   &SOFT_LIMIT_DOWN_MM,         nullptr,                 0,    1000, "mm   max travel down from 0"},
+  {"cycle_max",   &MAX_CYCLE_MOVE_MM,          nullptr,                 1,    1000, "mm   max travel in one correction cycle"},
+};
+const int NUM_SETTINGS = sizeof(SETTINGS) / sizeof(SETTINGS[0]);
+
+void printSettings() {
+  Serial.println("---- SETTINGS (change with: set <name> <value>) ----");
+  for (int i = 0; i < NUM_SETTINGS; i++) {
+    const Setting& s = SETTINGS[i];
+    Serial.printf("  %-11s %8.2f  %s\n", s.name, s.f ? *s.f : *s.ms / 1000.0f, s.help);
+  }
+  Serial.println("Changes last until reset; copy final values into the sketch.");
+}
+
+void handleSet(String args) {
+  args.trim();
+  if (args.length() == 0) { printSettings(); return; }
+  int sp = args.indexOf(' ');
+  String name = sp < 0 ? args : args.substring(0, sp);
+  if (sp < 0) { Serial.println("** Usage: set <name> <value>   ('set' lists them)"); return; }
+  float v = args.substring(sp + 1).toFloat();
+  for (int i = 0; i < NUM_SETTINGS; i++) {
+    const Setting& s = SETTINGS[i];
+    if (!name.equalsIgnoreCase(s.name)) continue;
+    if (v < s.lo || v > s.hi) {
+      Serial.printf("** %s must be between %g and %g\n", s.name, s.lo, s.hi);
+      return;
+    }
+    if (s.f) *s.f = v; else *s.ms = (uint32_t)lroundf(v * 1000.0f);
+    Serial.printf("** %s = %g\n", s.name, v);
+    // Side effects of a few settings:
+    if (s.f == &AVG_WINDOW_S && tragusHzX10) setWindowFromRate(tragusHzX10);
+    if (s.f == &STABLE_WINDOW_S) computeStabilitySlopes(millis());
+    if (TARGET_CM >= TRIGGER_CM) Serial.println("   warning: target should be smaller than trigger");
+    return;
+  }
+  Serial.printf("** Unknown setting '%s' ('set' lists them)\n", name.c_str());
+}
+
 void handleCommand(String cmd) {
   cmd.trim();
   if (cmd.length() == 0) return;
+  if (cmd.startsWith("set")) { handleSet(cmd.substring(3)); return; }
   char c = cmd.charAt(0);
   float arg = cmd.length() > 1 ? cmd.substring(1).toFloat() : 0;
   switch (c) {
